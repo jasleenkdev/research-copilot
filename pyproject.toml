@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "research-copilot"
+version = "0.1.0"
+description = "A research assistant built incrementally to learn LangChain and LangGraph."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain>=1.4",
+    "langchain-anthropic>=1.7",
+    "langgraph>=1.2",
+    "langsmith>=0.12",
+    "python-dotenv>=1.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9"]
+
+[project.scripts]
+research-copilot = "research_copilot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
