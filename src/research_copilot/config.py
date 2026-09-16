@@ -9,6 +9,7 @@ around. Enabling LangSmith tracing needs no code at all; the env vars are enough
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -18,6 +19,10 @@ load_dotenv(override=False)
 
 DEFAULT_MODEL = "claude-opus-5"
 
+# Anchor file paths to the repo, not the shell's current directory, so the
+# vector store is the same one wherever you run the CLI from.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -25,6 +30,14 @@ class Settings:
     tracing_enabled: bool
     langsmith_api_key_set: bool
     langsmith_project: str | None
+    # Phase 2: conversation memory
+    memory_strategy: str
+    max_history_tokens: int
+    # Phase 2: retrieval
+    embedding_model: str
+    chroma_dir: Path
+    collection_name: str
+    retrieval_k: int
 
 
 def get_settings() -> Settings:
@@ -33,6 +46,21 @@ def get_settings() -> Settings:
         tracing_enabled=os.getenv("LANGSMITH_TRACING", "").lower() == "true",
         langsmith_api_key_set=bool(os.getenv("LANGSMITH_API_KEY")),
         langsmith_project=os.getenv("LANGSMITH_PROJECT"),
+        # "trim" drops old turns; "summarize" folds them into a summary message.
+        memory_strategy=(
+            os.getenv("RESEARCH_COPILOT_MEMORY_STRATEGY") or "trim"
+        ).lower(),
+        # Deliberately small so pruning is easy to trigger and watch.
+        max_history_tokens=int(os.getenv("RESEARCH_COPILOT_MAX_HISTORY_TOKENS") or 1200),
+        embedding_model=(
+            os.getenv("RESEARCH_COPILOT_EMBEDDING_MODEL")
+            or "sentence-transformers/all-MiniLM-L6-v2"
+        ),
+        chroma_dir=Path(
+            os.getenv("RESEARCH_COPILOT_CHROMA_DIR") or PROJECT_ROOT / "data" / "chroma"
+        ),
+        collection_name=os.getenv("RESEARCH_COPILOT_COLLECTION") or "research_copilot",
+        retrieval_k=int(os.getenv("RESEARCH_COPILOT_RETRIEVAL_K") or 4),
     )
 
 
