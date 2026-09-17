@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/langchain-ai/langgraph/main/libs/cli/schemas/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "research_copilot": "./src/research_copilot/graph.py:make_graph",
+    "prebuilt": "./src/research_copilot/prebuilt.py:make_graph"
+  },
+  "env": ".env"
+}

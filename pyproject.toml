@@ -24,6 +24,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=9"]
+# Phase 3: the local LangGraph dev server that LangGraph Studio connects to.
+# Kept optional because it pulls in a web server and is only needed for
+# visualization, not for the CLI or the tests.
+studio = ["langgraph-cli[inmem]>=0.1.55"]
 
 [project.scripts]
 research-copilot = "research_copilot.cli:main"

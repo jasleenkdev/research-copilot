@@ -12,6 +12,11 @@ Phase 2 commands:
   ask-docs    RAG: retrieve from the ingested documents, answer from them only
   ask         the same question answered in either mode (knowledge base or live
               search), which is the choice a Supervisor agent will make in Phase 6
+
+Phase 3 commands:
+  graph-agent     the same work as `ask`, rebuilt as a LangGraph StateGraph
+  prebuilt-agent  the live-search path via langgraph.prebuilt.create_react_agent
+  draw-graph      print either graph's structure without calling a model
 """
 
 import argparse
@@ -27,6 +32,8 @@ from research_copilot.ingest import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, i
 from research_copilot.memory import ConversationMemory, memory_from_settings
 from research_copilot.models import get_chat_model
 from research_copilot.prompts import CHAT_PROMPT, RESEARCHER_PERSONA
+from research_copilot.graph import build_graph, final_answer, run_graph
+from research_copilot.prebuilt import build_prebuilt_agent, run_prebuilt_agent
 from research_copilot.retrieval import (
     build_rag_chain,
     count_chunks,
@@ -217,6 +224,92 @@ def cmd_ask(question: str, mode: str, k: int | None, max_iterations: int) -> Non
     print(result.answer)
 
 
+# --- Phase 3: the first LangGraph ---------------------------------------------
+
+
+def _print_final_state(state: dict) -> None:
+    """Show the whole final state, not just the answer.
+
+    This is the habit Phase 3 is trying to build. `.invoke()` on a compiled
+    graph returns every key every node wrote, and reading that dict is how you
+    tell which path a run actually took - the transcript shape alone tells you
+    whether the tool loop ran, and `documents` tells you whether retrieval did.
+    """
+    print("\n--- final state ---", file=sys.stderr)
+    print(f"  question:   {state.get('question')}", file=sys.stderr)
+    print(f"  mode:       {state.get('mode')}", file=sys.stderr)
+    print(f"  iterations: {state.get('iterations')}", file=sys.stderr)
+
+    documents = state.get("documents") or []
+    if documents:
+        print(f"  documents:  {len(documents)} retrieved", file=sys.stderr)
+        for i, document in enumerate(documents, start=1):
+            print(f"    [{i}] {describe_source(document)}", file=sys.stderr)
+
+    print(f"  messages:   {len(state.get('messages', []))}", file=sys.stderr)
+    for message in state.get("messages", []):
+        preview = " ".join(message.text.split())
+        if len(preview) > 70:
+            preview = preview[:70] + "..."
+        # Tool calls carry no text, so name them explicitly - otherwise the
+        # AIMessage that drove a search looks like an empty turn.
+        calls = getattr(message, "tool_calls", None)
+        if calls:
+            preview = (preview + " ") if preview else ""
+            preview += "-> " + ", ".join(f"{c['name']}({c['args']})" for c in calls)
+        print(f"    {message.type:>6}: {preview}", file=sys.stderr)
+    print("--- end state ---", file=sys.stderr)
+
+
+def cmd_graph_agent(question: str, mode: str, max_iterations: int) -> None:
+    if mode == "knowledge-base" and _warn_if_empty_store():
+        return
+
+    state = run_graph(question, mode=mode, max_iterations=max_iterations)
+    print(final_answer(state))
+    _print_final_state(state)
+
+
+def cmd_prebuilt_agent(question: str) -> None:
+    state = run_prebuilt_agent(question)
+    print(final_answer(state))
+    _print_final_state(state)
+
+
+def cmd_draw_graph(which: str) -> None:
+    """Print the compiled graph's structure without running it.
+
+    `.get_graph()` returns the structure LangGraph derived from the nodes and
+    edges you declared - the same structure Studio renders. That it can be drawn
+    before anything runs is the point of compiling separately from invoking.
+
+    No model is called and no tokens are spent, though ANTHROPIC_API_KEY still
+    has to be set: building the graph constructs the ChatAnthropic object (to
+    bind the tools to it), and the factory checks for a key at that point.
+    """
+    graph = build_graph() if which == "graph" else build_prebuilt_agent()
+    drawn = graph.get_graph()
+
+    print("--- nodes ---")
+    for node in drawn.nodes:
+        print(f"  {node}")
+    print("--- edges ---")
+    for edge in drawn.edges:
+        label = f"  [{edge.data}]" if edge.data else ""
+        dashed = " (conditional)" if edge.conditional else ""
+        print(f"  {edge.source} -> {edge.target}{label}{dashed}")
+
+    # Mermaid needs no extra packages; the ASCII renderer needs grandalf, which
+    # isn't worth a dependency when Studio and mermaid.live both draw this better.
+    print("\n--- mermaid (paste into https://mermaid.live) ---")
+    print(drawn.draw_mermaid())
+    try:
+        print("--- ascii ---")
+        print(drawn.draw_ascii())
+    except ImportError:
+        print("(install grandalf for ASCII art: pip install grandalf)")
+
+
 def _report_tracing() -> None:
     settings = get_settings()
     if settings.tracing_enabled and not settings.langsmith_api_key_set:
@@ -234,7 +327,7 @@ def _report_tracing() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="research-copilot", description="Research Copilot (Phases 1-2)"
+        prog="research-copilot", description="Research Copilot (Phases 1-3)"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -303,6 +396,36 @@ def main(argv: list[str] | None = None) -> int:
     ask_parser.add_argument("-k", type=int, default=None)
     ask_parser.add_argument("--max-iterations", type=int, default=6)
 
+    # --- Phase 3 ---
+    graph_parser = subparsers.add_parser(
+        "graph-agent",
+        help="The same work as `ask`, rebuilt as a LangGraph StateGraph",
+    )
+    graph_parser.add_argument("question")
+    graph_parser.add_argument(
+        "--mode",
+        choices=["knowledge-base", "live-search"],
+        default="live-search",
+        help=(
+            "Which branch route_by_mode takes. knowledge-base: retrieve_docs -> "
+            "call_model. live-search: call_model <-> call_tool until done."
+        ),
+    )
+    graph_parser.add_argument("--max-iterations", type=int, default=6)
+
+    prebuilt_parser = subparsers.add_parser(
+        "prebuilt-agent",
+        help="The live-search path via langgraph.prebuilt.create_react_agent",
+    )
+    prebuilt_parser.add_argument("question")
+
+    draw_parser = subparsers.add_parser(
+        "draw-graph", help="Print a graph's structure without running it"
+    )
+    draw_parser.add_argument(
+        "which", nargs="?", choices=["graph", "prebuilt"], default="graph"
+    )
+
     args = parser.parse_args(argv)
     _report_tracing()
 
@@ -323,6 +446,12 @@ def main(argv: list[str] | None = None) -> int:
             cmd_ask_docs(args.question, args.k)
         elif args.command == "ask":
             cmd_ask(args.question, args.mode, args.k, args.max_iterations)
+        elif args.command == "graph-agent":
+            cmd_graph_agent(args.question, args.mode, args.max_iterations)
+        elif args.command == "prebuilt-agent":
+            cmd_prebuilt_agent(args.question)
+        elif args.command == "draw-graph":
+            cmd_draw_graph(args.which)
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
