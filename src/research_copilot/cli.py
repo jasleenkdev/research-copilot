@@ -17,6 +17,14 @@ Phase 3 commands:
   graph-agent     the same work as `ask`, rebuilt as a LangGraph StateGraph
   prebuilt-agent  the live-search path via langgraph.prebuilt.create_react_agent
   draw-graph      print either graph's structure without calling a model
+
+Phase 4 commands:
+  graph-chat      multi-turn conversation against one thread_id, persisted
+  review          show a paused thread's draft and approve / reject / edit it
+  threads         list the conversations in the checkpointer
+
+`graph-agent` also gains --thread, --checkpointer and --approve, which is what
+makes two separate CLI invocations continue the same conversation.
 """
 
 import argparse
@@ -32,7 +40,22 @@ from research_copilot.ingest import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, i
 from research_copilot.memory import ConversationMemory, memory_from_settings
 from research_copilot.models import get_chat_model
 from research_copilot.prompts import CHAT_PROMPT, RESEARCHER_PERSONA
-from research_copilot.graph import build_graph, final_answer, run_graph
+from research_copilot.checkpointing import (
+    KINDS,
+    checkpointer_scope,
+    count_checkpoints,
+    describe_checkpointer,
+    list_thread_ids,
+    new_thread_id,
+    thread_config,
+)
+from research_copilot.graph import (
+    build_graph,
+    final_answer,
+    pending_interrupt,
+    resume_graph,
+    run_graph,
+)
 from research_copilot.prebuilt import build_prebuilt_agent, run_prebuilt_agent
 from research_copilot.retrieval import (
     build_rag_chain,
@@ -240,6 +263,17 @@ def _print_final_state(state: dict) -> None:
     print(f"  mode:       {state.get('mode')}", file=sys.stderr)
     print(f"  iterations: {state.get('iterations')}", file=sys.stderr)
 
+    # Phase 4 keys, printed only when they hold something, so a Phase 3-style
+    # run's state dump looks exactly as it did before.
+    if state.get("status") and state.get("status") != "drafting":
+        print(f"  status:     {state.get('status')}", file=sys.stderr)
+    if state.get("draft"):
+        print(f"  draft:      {state['draft'][:70]}...", file=sys.stderr)
+    if state.get("human_feedback"):
+        print(f"  feedback:   {state.get('human_feedback')}", file=sys.stderr)
+    if state.get("summary"):
+        print(f"  summary:    {state['summary'][:70]}...", file=sys.stderr)
+
     documents = state.get("documents") or []
     if documents:
         print(f"  documents:  {len(documents)} retrieved", file=sys.stderr)
@@ -261,13 +295,284 @@ def _print_final_state(state: dict) -> None:
     print("--- end state ---", file=sys.stderr)
 
 
-def cmd_graph_agent(question: str, mode: str, max_iterations: int) -> None:
+# --- Phase 4: persistence and human-in-the-loop -------------------------------
+
+
+def _resolve_thread(thread_id: str | None) -> tuple[str, bool]:
+    """Pick the thread_id for this run, and say whether it is a new one.
+
+    CONCEPT: thread_id is yours to manage (see checkpointing.py).
+    There is no "current thread" - LangGraph will not remember one for you, and
+    a missing thread_id is not an error, just a conversation that accumulates
+    nothing. So the CLI does the two halves explicitly: mint a UUID when you
+    start, and take `--thread <id>` when you continue. The id is printed on
+    every run precisely because the *next* invocation has to pass it back in.
+    """
+    if thread_id:
+        return thread_id, False
+    return new_thread_id(), True
+
+
+def _announce_thread(thread_id: str, is_new: bool, saver) -> None:
+    print(f"[thread] {thread_id}" + ("  (new)" if is_new else ""), file=sys.stderr)
+    print(f"[checkpointer] {describe_checkpointer(saver)}", file=sys.stderr)
+    if is_new and saver is not None:
+        print(
+            f"[thread] continue this conversation with: --thread {thread_id}",
+            file=sys.stderr,
+        )
+
+
+def _print_pending(payload: dict) -> None:
+    """Show a parked run's interrupt payload - the question put to the human."""
+    print("--- awaiting approval ---")
+    print(f"question: {payload.get('question', '')}")
+    print(f"mode:     {payload.get('mode', '')}")
+    print("\ndraft:")
+    print(payload.get("draft", "") or "(empty draft)")
+    print("--- end draft ---")
+
+
+def cmd_graph_agent(
+    question: str,
+    mode: str,
+    max_iterations: int,
+    *,
+    thread_id: str | None = None,
+    checkpointer: str | None = None,
+    approve: bool = False,
+    memory_strategy: str | None = None,
+    max_history_tokens: int | None = None,
+) -> None:
+    """One turn of the graph, optionally against a persistent thread.
+
+    The Phase 4 change that matters is the `config` argument threaded through
+    `run_graph`: the question goes into the state dict, the thread_id goes into
+    the config, and running this command twice with the same `--thread` makes
+    `state.messages` carry over between two *separate processes*.
+    """
     if mode == "knowledge-base" and _warn_if_empty_store():
         return
 
-    state = run_graph(question, mode=mode, max_iterations=max_iterations)
-    print(final_answer(state))
-    _print_final_state(state)
+    with checkpointer_scope(checkpointer) as saver:
+        thread, is_new = _resolve_thread(thread_id)
+        _announce_thread(thread, is_new, saver)
+
+        graph = build_graph(
+            max_iterations=max_iterations,
+            checkpointer=saver,
+            require_approval=approve,
+            memory_strategy=memory_strategy,
+            max_history_tokens=max_history_tokens,
+        )
+        state = run_graph(question, mode=mode, graph=graph, thread_id=thread)
+
+        # A parked run returns early with __interrupt__ instead of an answer.
+        if "__interrupt__" in state:
+            _print_pending(state["__interrupt__"][0].value)
+            print(
+                f"\n[paused] resume with: research-copilot review --thread {thread}",
+                file=sys.stderr,
+            )
+            _print_final_state(state)
+            return
+
+        print(final_answer(state))
+        _print_final_state(state)
+
+
+def cmd_graph_chat(
+    mode: str,
+    max_iterations: int,
+    *,
+    thread_id: str | None = None,
+    checkpointer: str | None = None,
+    approve: bool = False,
+    memory_strategy: str | None = None,
+    max_history_tokens: int | None = None,
+) -> None:
+    """Phase 2's `chat`, rebuilt on the checkpointer instead of a local object.
+
+    Worth comparing the two directly. `cmd_chat` holds a `ConversationMemory`
+    in a local variable, and the conversation exists because that variable does
+    - close the process and it is gone. Here the loop holds nothing: every turn
+    is a fresh `.invoke()` and the history comes back from the checkpointer,
+    addressed by a thread_id that never changes between turns.
+
+    That is the thread_id vs State distinction made concrete. `thread` is
+    computed once, before the loop, and passed as *config* on every turn. The
+    question changes each turn and goes in the *state*. If thread_id lived in
+    State, each turn's input would overwrite it and there would be no way to say
+    "same conversation, new question".
+    """
+    with checkpointer_scope(checkpointer) as saver:
+        if saver is None:
+            print(
+                "[warning] --checkpointer none: each turn starts from an empty "
+                "transcript, which makes this the same as running graph-agent "
+                "repeatedly.",
+                file=sys.stderr,
+            )
+
+        thread, is_new = _resolve_thread(thread_id)
+        _announce_thread(thread, is_new, saver)
+
+        graph = build_graph(
+            max_iterations=max_iterations,
+            checkpointer=saver,
+            require_approval=approve,
+            memory_strategy=memory_strategy,
+            max_history_tokens=max_history_tokens,
+        )
+
+        print("\nType /state to dump the persisted state, /exit to quit.\n")
+
+        while True:
+            try:
+                user_input = input("you> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            if not user_input:
+                continue
+            if user_input in {"/exit", "/quit"}:
+                break
+            if user_input == "/state":
+                # Reading the thread without running it - see pending_interrupt.
+                snapshot = graph.get_state(thread_config(thread))
+                _print_final_state(snapshot.values)
+                print(f"  next node: {snapshot.next or '(idle)'}", file=sys.stderr)
+                continue
+
+            state = run_graph(user_input, mode=mode, graph=graph, thread_id=thread)
+
+            if "__interrupt__" in state:
+                _print_pending(state["__interrupt__"][0].value)
+                verdict = _prompt_for_verdict()
+                state = resume_graph(graph, verdict, thread_id=thread)
+
+            print(f"copilot> {final_answer(state)}\n")
+
+
+def _prompt_for_verdict() -> dict:
+    """Ask the operator for a verdict, interactively.
+
+    Anything unrecognized falls through to `_parse_verdict` in graph.py, which
+    fails closed and treats it as a rejection.
+    """
+    try:
+        raw = input("approve / reject / edit> ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return {"decision": "reject", "note": "no verdict given"}
+
+    if raw.startswith("a"):
+        return {"decision": "approve"}
+    if raw.startswith("e"):
+        print("Enter the edited answer:")
+        return {"decision": "edit", "text": input("edit> ")}
+    return {"decision": "reject", "note": input("why? ").strip()}
+
+
+def cmd_review(
+    thread_id: str,
+    *,
+    checkpointer: str | None = None,
+    decision: str | None = None,
+    text: str = "",
+    note: str = "",
+    max_iterations: int = 6,
+) -> None:
+    """Show a paused thread and resume it with a verdict. (Part C)
+
+    This command is the payoff of persistence: it runs in a *different process*
+    from the one that produced the draft, and it finds the parked run purely
+    from the thread_id and the checkpointer. Nothing was held in memory between
+    the two invocations.
+
+    Note that the graph is rebuilt here from scratch. A compiled graph is
+    stateless - the conversation lives in the checkpointer, not in the object -
+    so "the same graph" only has to mean "the same shape and the same saver".
+    """
+    with checkpointer_scope(checkpointer) as saver:
+        if saver is None:
+            print(
+                "error: review needs a checkpointer; a run parked with "
+                "--checkpointer none no longer exists.",
+                file=sys.stderr,
+            )
+            return
+
+        graph = build_graph(
+            max_iterations=max_iterations,
+            checkpointer=saver,
+            require_approval=True,
+        )
+
+        snapshot = graph.get_state(thread_config(thread_id))
+        payload = pending_interrupt(graph, thread_id=thread_id)
+
+        if payload is None:
+            # Two different failures, deliberately reported differently: an
+            # unknown thread_id and a known thread with nothing parked both
+            # return an empty snapshot's worth of "no interrupts", and telling
+            # them apart is the difference between a typo and a no-op.
+            if not snapshot.values:
+                print(
+                    f"error: thread {thread_id!r} has no saved state. Either the "
+                    "id is wrong, or it was written by a different checkpointer "
+                    f"(this one is {describe_checkpointer(saver)}).",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"Thread {thread_id} exists but nothing is awaiting approval "
+                    f"(next: {snapshot.next or 'idle'}).",
+                    file=sys.stderr,
+                )
+                _print_final_state(snapshot.values)
+            return
+
+        _print_pending(payload)
+
+        if decision is None:
+            verdict: dict = _prompt_for_verdict()
+        elif decision == "edit":
+            verdict = {"decision": "edit", "text": text, "note": note}
+        elif decision == "reject":
+            verdict = {"decision": "reject", "note": note}
+        else:
+            verdict = {"decision": "approve"}
+
+        # CONCEPT: Command(resume=...) goes where a state dict normally goes.
+        state = resume_graph(graph, verdict, thread_id=thread_id)
+        print()
+        print(final_answer(state))
+        _print_final_state(state)
+
+
+def cmd_threads(checkpointer: str | None = None) -> None:
+    """List the conversations the checkpointer holds.
+
+    Useful in its own right, and it makes two Phase 4 facts visible: thread_ids
+    are just strings the checkpointer has seen, and the checkpoint *count* grows
+    per super-step rather than per question - which is the real answer to "what
+    does an unbounded conversation look like on disk".
+    """
+    with checkpointer_scope(checkpointer) as saver:
+        if saver is None:
+            print("--checkpointer none stores nothing; there are no threads.")
+            return
+
+        print(f"[checkpointer] {describe_checkpointer(saver)}", file=sys.stderr)
+        thread_ids = list_thread_ids(saver)
+        if not thread_ids:
+            print("No threads yet. Run `graph-chat` or `graph-agent --thread <id>`.")
+            return
+
+        print(f"{'thread_id':<40} checkpoints")
+        for thread_id in thread_ids:
+            print(f"{thread_id:<40} {count_checkpoints(saver, thread_id)}")
 
 
 def cmd_prebuilt_agent(question: str) -> None:
@@ -325,9 +630,49 @@ def _report_tracing() -> None:
         )
 
 
+def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
+    """Flags shared by the commands that can persist state.
+
+    `--checkpointer` is Phase 4's counterpart to Phase 2's `--memory`: the same
+    "policy is a flag, not a rewrite" idea, one layer down. `--memory` chose how
+    history was *compressed*; this chooses where it is *kept*.
+    """
+    parser.add_argument(
+        "--checkpointer",
+        choices=list(KINDS),
+        default=None,
+        help=(
+            "none: Phase 3 behaviour, state dies with the run. memory: persists "
+            "for this process. sqlite: persists to data/ across processes. "
+            "Defaults to RESEARCH_COPILOT_CHECKPOINTER."
+        ),
+    )
+    parser.add_argument(
+        "--approve",
+        action="store_true",
+        help=(
+            "Pause at interrupt() for human approval before the answer is "
+            "committed to the transcript. Requires a checkpointer."
+        ),
+    )
+    parser.add_argument(
+        "--memory",
+        dest="memory_strategy",
+        choices=["trim", "summarize", "none"],
+        default=None,
+        help="How prune_history keeps the persisted transcript in budget",
+    )
+    parser.add_argument(
+        "--max-history-tokens",
+        type=int,
+        default=None,
+        help="Token budget for the persisted transcript (0 disables pruning)",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="research-copilot", description="Research Copilot (Phases 1-3)"
+        prog="research-copilot", description="Research Copilot (Phases 1-4)"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -412,12 +757,71 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     graph_parser.add_argument("--max-iterations", type=int, default=6)
+    _add_phase4_flags(graph_parser)
+    graph_parser.add_argument(
+        "--thread",
+        default=None,
+        help=(
+            "Continue an existing conversation. Omit to start a new one (the "
+            "generated id is printed, so the next run can pass it back)."
+        ),
+    )
 
     prebuilt_parser = subparsers.add_parser(
         "prebuilt-agent",
         help="The live-search path via langgraph.prebuilt.create_react_agent",
     )
     prebuilt_parser.add_argument("question")
+
+    # --- Phase 4 ---
+    chat_graph_parser = subparsers.add_parser(
+        "graph-chat",
+        help="Multi-turn conversation against one persisted thread_id",
+    )
+    chat_graph_parser.add_argument(
+        "--thread",
+        default=None,
+        help="Resume an existing conversation instead of starting a new one",
+    )
+    chat_graph_parser.add_argument(
+        "--mode", choices=["knowledge-base", "live-search"], default="live-search"
+    )
+    chat_graph_parser.add_argument("--max-iterations", type=int, default=6)
+    _add_phase4_flags(chat_graph_parser)
+
+    review_parser = subparsers.add_parser(
+        "review",
+        help="Show a thread paused at interrupt() and approve/reject/edit it",
+    )
+    review_parser.add_argument("--thread", required=True, help="The paused thread_id")
+    review_parser.add_argument(
+        "--checkpointer",
+        choices=list(KINDS),
+        default=None,
+        help="Must match the checkpointer that wrote the thread",
+    )
+    # Mutually exclusive: a verdict is one decision, and omitting all three
+    # drops into the interactive prompt.
+    verdict_group = review_parser.add_mutually_exclusive_group()
+    verdict_group.add_argument(
+        "--approve", action="store_true", help="Accept the draft as written"
+    )
+    verdict_group.add_argument(
+        "--reject", action="store_true", help="Discard the draft (give --note)"
+    )
+    verdict_group.add_argument(
+        "--edit", metavar="TEXT", default=None, help="Accept this text instead"
+    )
+    review_parser.add_argument(
+        "--note", default="", help="Why, recorded in State['human_feedback']"
+    )
+
+    threads_parser = subparsers.add_parser(
+        "threads", help="List the conversations stored in the checkpointer"
+    )
+    threads_parser.add_argument(
+        "--checkpointer", choices=list(KINDS), default=None
+    )
 
     draw_parser = subparsers.add_parser(
         "draw-graph", help="Print a graph's structure without running it"
@@ -447,7 +851,43 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "ask":
             cmd_ask(args.question, args.mode, args.k, args.max_iterations)
         elif args.command == "graph-agent":
-            cmd_graph_agent(args.question, args.mode, args.max_iterations)
+            cmd_graph_agent(
+                args.question,
+                args.mode,
+                args.max_iterations,
+                thread_id=args.thread,
+                checkpointer=args.checkpointer,
+                approve=args.approve,
+                memory_strategy=args.memory_strategy,
+                max_history_tokens=args.max_history_tokens,
+            )
+        elif args.command == "graph-chat":
+            cmd_graph_chat(
+                args.mode,
+                args.max_iterations,
+                thread_id=args.thread,
+                checkpointer=args.checkpointer,
+                approve=args.approve,
+                memory_strategy=args.memory_strategy,
+                max_history_tokens=args.max_history_tokens,
+            )
+        elif args.command == "review":
+            decision = None
+            if args.approve:
+                decision = "approve"
+            elif args.reject:
+                decision = "reject"
+            elif args.edit is not None:
+                decision = "edit"
+            cmd_review(
+                args.thread,
+                checkpointer=args.checkpointer,
+                decision=decision,
+                text=args.edit or "",
+                note=args.note,
+            )
+        elif args.command == "threads":
+            cmd_threads(args.checkpointer)
         elif args.command == "prebuilt-agent":
             cmd_prebuilt_agent(args.question)
         elif args.command == "draw-graph":

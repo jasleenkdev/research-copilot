@@ -20,6 +20,10 @@ dependencies = [
     "langchain-huggingface>=1.2",
     "sentence-transformers>=6.0",
     "pypdf>=6.0",
+    # Phase 4: the SqliteSaver checkpointer. A separate package from langgraph
+    # itself - langgraph ships MemorySaver, and each durable backend
+    # (sqlite, postgres) is its own dependency you opt into.
+    "langgraph-checkpoint-sqlite>=3.0",
 ]
 
 [project.optional-dependencies]

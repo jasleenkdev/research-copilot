@@ -61,6 +61,30 @@ it per-call from `mode`, the same way Phase 2 kept the persona in `CHAT_PROMPT`
 rather than in `ConversationMemory.messages`. Pruning, replaying, and
 checkpointing a transcript are all simpler when the instructions aren't mixed
 into the turns.
+
+CONCEPT (Phase 4): what is in State and what is emphatically not
+Phase 4 attaches a checkpointer, which means every key below is now *written to
+disk after every super-step*. That turns State's contents into a design
+decision with consequences:
+
+  - it is serialized, so everything in it must be serializable. `documents` is
+    fine (LangChain `Document` objects round-trip); an open file handle, a
+    database connection, or a compiled model object would not be.
+  - it is durable, so anything you put here you are choosing to keep. A secret
+    dropped into State is a secret written to `data/checkpoints.sqlite3`.
+  - it is per-conversation, so it must not hold anything that identifies *which*
+    conversation this is. The thread_id is not in State and cannot be - see the
+    long note at the top of checkpointing.py. State is the content; `config` is
+    the address.
+
+CONCEPT (Phase 4): State keys as a schema you have to migrate
+Because old snapshots on disk were written against the State you had *then*,
+adding a key is safe (it reads back missing, and `total=False` plus
+`state.get(...)` already handles that) while renaming or repurposing one is not.
+An existing thread resumed after a rename carries the old key, which no node
+reads any more, and the new key is absent. That is why every key here is read
+with `state.get(key, default)` and never `state[key]`: the defaults *are* the
+migration path for threads written before the key existed.
 """
 
 from typing import Annotated, Literal, TypedDict
@@ -73,6 +97,26 @@ from langgraph.graph.message import add_messages
 # Phase 6's Supervisor will choose this value from the question itself instead of
 # taking it from a CLI flag.
 Mode = Literal["knowledge-base", "live-search"]
+
+# Phase 4. The positions a draft can be in, named rather than numbered so that a
+# state dump reads like English and an unexpected value is obvious.
+#   drafting           nothing is pending; the model is still working
+#   awaiting_approval  the model has drafted an answer; a human owes a decision
+#   approved           the draft (possibly edited) is going into the transcript
+#   rejected           the draft is discarded; `human_feedback` says why
+#
+# "drafting" is the one that is easy to leave out and shouldn't be. Without it
+# there is no value meaning "no decision is pending", so the field can only ever
+# be read as stale: a thread whose previous turn ended on "awaiting_approval"
+# (because the iteration cap tripped before the reviewer was asked) would send
+# the *next* turn straight to review, before the model had drafted anything.
+# `run_graph` resets the field to "drafting" at the start of every turn and
+# `call_model` sets it back whenever it emits a tool call, so the value always
+# describes the current turn rather than some earlier one.
+#
+# Phase 5 will add a fifth position for the critique loop ("needs_revision"),
+# which is why this is a Literal that can grow and not a bool.
+ReviewStatus = Literal["drafting", "awaiting_approval", "approved", "rejected"]
 
 
 class State(TypedDict, total=False):
@@ -118,3 +162,89 @@ class State(TypedDict, total=False):
     # itself. (`Annotated[int, operator.add]` would be the accumulating
     # alternative - then nodes would return the *delta*, `{"iterations": 1}`.)
     iterations: int
+
+    # --- Phase 4: compressed history -----------------------------------------
+    # Phase 2's summarize strategy, as a state key. When `prune_history` folds
+    # old turns away under the "summarize" strategy, the gist lands here and
+    # `call_model` prepends it to the request as a SystemMessage.
+    #
+    # Why a separate key rather than a SystemMessage inside `messages`: order.
+    # `add_messages` appends, so a summary returned by a node would land at the
+    # *end* of the transcript - after the turns it summarizes, which reads as
+    # nonsense to the model. Keeping it out of `messages` also preserves the rule
+    # set out above: `messages` holds conversation turns, instructions are built
+    # per call. Overwrite is the right reducer: each summarization produces the
+    # new complete summary (it is given the previous one as input).
+    summary: str
+
+    # --- Phase 4: the human-in-the-loop handshake -----------------------------
+    # The answer the model has proposed but that has *not* been committed to
+    # `messages` yet. This key is the whole reason human-in-the-loop needs richer
+    # state: "an answer awaiting approval" is a real thing the system can be in
+    # the middle of, and a transcript alone cannot express it. `messages` has
+    # room for a turn that happened; it has no room for a turn that is pending.
+    #
+    # The lifecycle, all of it visible in graph.py:
+    #   call_model      writes `draft` + status "awaiting_approval" instead of
+    #                   appending to `messages`
+    #   review_draft    interrupt()s, then records the verdict
+    #   finalize_answer commits the approved (possibly edited) text to `messages`
+    #                   and clears the draft
+    draft: str
+
+    # Where the draft is in that handshake. The values are deliberately explicit
+    # rather than a bare bool: "not yet asked", "asked and refused", and "asked
+    # and accepted" are three different states, and a bool can only hold two.
+    #
+    # This is also what makes a *resumed* run legible. A process that starts up
+    # and loads a thread has no memory of what happened before; `status ==
+    # "awaiting_approval"` plus `graph.get_state(config).next` is how the CLI
+    # knows, from the snapshot alone, that somebody is owed a decision.
+    status: ReviewStatus
+
+    # What the reviewer said when they rejected or edited the draft. Kept because
+    # a rejection with no reason is not actionable - and because Phase 5's revise
+    # loop will feed exactly this text back to the model as the instruction for
+    # the next attempt. Writing it down now means Phase 5 adds an edge, not a
+    # field.
+    human_feedback: str
+
+    # --- loop accounting, part two: why one counter will not be enough --------
+    # PHASE 5 NOTE (Part D): where the second iteration counter goes.
+    #
+    # `iterations` above counts *call_model invocations within one turn* - it is
+    # the guard on the call_model <-> call_tool cycle, and `should_continue`
+    # compares it against `max_iterations`. That is the tool loop's budget and
+    # nothing else's.
+    #
+    # Phase 5 adds a second cycle: draft -> critique -> revise -> critique,
+    # looping until the critic is satisfied or a cap is hit. It is tempting to
+    # reuse `iterations` for that cap, and it is wrong, because the two cycles
+    # are nested and measure different things:
+    #
+    #   one revision attempt may itself run the tool loop several times
+    #     revise -> call_model -> call_tool -> call_model  (iterations 1, 2)
+    #   and the whole thing may then be revised again
+    #     critique -> revise -> call_model -> ...          (iterations 3, 4)
+    #
+    # Share the field and three things break at once. The tool-loop cap trips
+    # during revision 2 for work that revision 1 did, so later revisions get less
+    # tool budget than earlier ones - the agent silently gets worse the harder it
+    # tries. The revise cap trips on tool calls, so a single tool-heavy answer
+    # looks like a model that cannot take criticism. And neither number means
+    # anything when you read the final state, because you cannot tell which cycle
+    # spent it.
+    #
+    # So Phase 5 adds its own key alongside, not instead:
+    #
+    #     revisions: int          # how many critique -> revise rounds have run
+    #
+    # with its own cap (`max_revisions`, separate from `max_iterations`) and its
+    # own routing function (`should_revise`, separate from `should_continue`).
+    # One more rule comes with it: whichever node begins a revision must reset
+    # `iterations` to 0, exactly as `run_graph` resets it at the start of every
+    # turn (see the note there about a checkpointed counter that never resets).
+    # A per-turn budget that is never reset is a budget that only ever runs out.
+    #
+    # Deliberately not declared yet - Phase 5 owns it. The note is here so the
+    # collision is a decision already made rather than a bug to be found.

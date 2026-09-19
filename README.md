@@ -21,10 +21,11 @@ next, not to ship the final system as fast as possible.
   (TypedDict state, `call_model` / `call_tool` nodes, conditional edges).
   Compare with `langgraph.prebuilt.create_react_agent`, then return to the
   hand-rolled version.
-- [ ] **Phase 4: State design & persistence.** Richer state (`question`,
-  `research_notes`, `draft`, `critique`, `iteration_count`), checkpointers
-  (`MemorySaver`, then `SqliteSaver`), and `interrupt()` for human approval before
-  an answer is finalized.
+- [x] **Phase 4: State design & persistence.** Richer state (`draft`, `status`,
+  `human_feedback`, `summary`), checkpointers (`MemorySaver`, then
+  `SqliteSaver`), a `prune_history` node that keeps the *persisted* transcript
+  in budget with `RemoveMessage`, and `interrupt()` for human approval before an
+  answer is finalized.
 - [ ] **Phase 5: Multi-step reasoning.** A reflection loop (draft → critique →
   revise, looping back until a quality threshold or max iterations) and a
   planning node that splits the question into sub-questions before research.
@@ -323,6 +324,172 @@ Notes:
 - Dev-server state is in memory and disappears when you stop the server. Phase 4
   adds a checkpointer, and Studio's thread list becomes genuinely useful.
 
+## Usage (Phase 4)
+
+Phase 3's graph, now with a checkpointer under it. `graph.py` gains three nodes
+and three arguments; every Phase 1-3 command behaves exactly as before.
+
+```bash
+# One turn, persisted. The generated thread_id is printed on stderr.
+research-copilot graph-agent "recent methods for evaluating RAG" --checkpointer sqlite
+
+# Continue that conversation from a completely separate CLI invocation
+research-copilot graph-agent "which of those needs human labels?" --thread <id>
+
+# Interactive multi-turn against one thread. /state dumps the persisted state.
+research-copilot graph-chat --thread my-thread
+
+# Pause for approval before the answer is committed to the transcript
+research-copilot graph-agent "..." --thread t1 --approve
+
+# ...then, from another shell, review the parked draft
+research-copilot review --thread t1 --approve
+research-copilot review --thread t1 --edit "a better answer" --note "tightened"
+research-copilot review --thread t1 --reject --note "no sources"
+research-copilot review --thread t1            # interactive prompt
+
+# What is on disk
+research-copilot threads
+```
+
+### Part A: the checkpointer, and thread_id vs State
+
+`compile(checkpointer=saver)` is the whole change. After every super-step,
+LangGraph writes a snapshot of State keyed by the **thread_id in `config`**:
+
+```python
+graph.invoke(state_input, {"configurable": {"thread_id": "abc"}})
+#            ^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#            what this     which conversation it belongs to
+#            turn is about
+```
+
+They are separate on purpose. State is *content*; config is an *address*. A
+node returns partial State, so a node has no way to change which thread it is
+writing to — a run cannot wander into another conversation halfway through.
+Nodes never see the thread_id unless they ask for `config: RunnableConfig`.
+
+The practical half is in `cli.py`: `_resolve_thread` mints a UUID when you start
+and takes `--thread` when you continue, and the id is printed on every run
+because the *next* invocation has to pass it back. There is no "current thread".
+
+| | `MemorySaver` | `SqliteSaver` |
+| --- | --- | --- |
+| lives in | a dict in the process | a file under `data/` |
+| survives | across `.invoke()` calls | across processes |
+| right for | tests, one interactive session | local dev, seeing what a checkpoint *is* |
+
+Swap in `PostgresSaver` and nothing else changes. Persistence is a compile-time
+argument, not a rewrite.
+
+### What persistence quietly breaks
+
+Two Phase 3 assumptions stop holding the moment state survives a turn:
+
+1. **`messages` grows without bound.** Phase 3 started every run empty, so
+   Phase 2's token budget stopped mattering. Turn 40 now resends turns 1–39.
+   Part B is the fix.
+2. **`iterations` never resets.** It is a per-turn tool budget living in
+   per-thread storage, so turn 2 would start at 2 and turn 6 at 10 — and
+   `should_continue` would refuse tool calls for work earlier turns did. Fixed
+   by seeding `iterations: 0` in `turn_input`, and asserted in
+   `test_iterations_resets_each_turn_despite_being_checkpointed`.
+
+### Part B: pruning node vs `RemoveMessage`
+
+These look like two options. They are really two questions, and a node answers
+both:
+
+| | what the model sees this turn | what stays in the state |
+| --- | --- | --- |
+| **filtering node** (trim, send, `return {}`) | short | unchanged — grows forever |
+| **`RemoveMessage` node** | short | short — the next snapshot really lacks them |
+
+`prune_history` does the second. Two reasons: filtering fixes the token bill and
+leaves the durability problem, which is the one Phase 4 is actually about; and
+filtering has to be repeated identically by every future reader of that state
+(Studio, a Phase 7 API handler, Phase 6's other agents), whereas pruning into
+the state makes the shorter history the *actual* history.
+
+The honest cost, and the thing to keep straight: **deleted from state is not
+deleted from disk.** A checkpointer writes a new row per super-step and never
+rewrites old ones, so a removed message is gone from the *latest* snapshot and
+still sits in every earlier row of that thread. That is what makes time travel
+work. Pruning is a context-window and token-cost mechanism; if you need a
+message gone for real, `checkpointer.delete_thread(thread_id)` is the only
+operation that touches history. Asserted both ways in
+`test_pruning_shortens_the_current_state_but_not_the_checkpoint_history`.
+
+The node runs **once per turn at the entry**, not inside the tool loop:
+pruning between `call_model` and `call_tool` risks orphaning a `ToolMessage`
+from the `AIMessage` that requested it, which the Anthropic API rejects
+outright. Within a turn growth is bounded by `max_iterations`; across turns it
+is unbounded. Prune where the growth is unbounded.
+
+`--memory summarize` reuses Phase 2's `SUMMARY_PROMPT` and writes the gist to
+`State["summary"]` — a separate key rather than a `SystemMessage` in `messages`,
+because `add_messages` appends and a summary would land *after* the turns it
+summarizes.
+
+### Part C: `interrupt()` and `Command`
+
+```
+call_model  drafts into State["draft"], status "awaiting_approval"
+              (NOT into messages — nothing has been said to the user yet)
+review_draft  interrupt(payload) -> the run parks; .invoke() returns __interrupt__
+              ... a human decides, possibly days later, in another process ...
+              Command(resume=verdict) -> interrupt() returns the verdict
+finalize_answer  commits the approved (or edited) text to messages
+```
+
+`interrupt()` does not suspend a Python frame. **The node re-runs from its first
+line on resume**, and LangGraph feeds the stored resume value to `interrupt()`
+when execution reaches it again. So everything above that call happens twice —
+which is exactly why `call_model` produces the draft and `review_draft` only
+reviews it. A model call before the `interrupt()` would be paid for twice and,
+being non-deterministic, would hand the reviewer a verdict on text that no
+longer matches what they approved. Keep pre-interrupt work cheap and idempotent.
+
+A draft needs its own state key because `messages` can represent a turn that
+*happened*, not a turn that is *proposed*. Had the answer been appended first,
+rejecting it would mean editing history instead of declining to write it.
+
+Unrecognized verdicts **fail closed** (`_parse_verdict` treats them as
+rejections): an approval gate must never read confusion as consent.
+
+### Part D: the second iteration counter (a note, not code)
+
+`iterations` counts `call_model` calls *within one turn* — the tool loop's
+budget. Phase 5 adds a nested cycle (draft → critique → revise), and sharing one
+field breaks three things at once: the tool cap trips during revision 2 for work
+revision 1 did, so the agent gets worse the harder it tries; the revise cap
+trips on tool calls; and neither number means anything when you read the final
+state. Phase 5 adds `revisions: int` alongside, with its own cap and its own
+routing function. The full reasoning is at the bottom of `state.py`.
+
+### The graph now
+
+```
+START ─→ prune_history ──route_by_mode──┬─ "knowledge-base" ─→ retrieve_docs ─┐
+                                        └─ "live-search" ───────────────────┐ │
+                                    ┌───────────────────────────────────────┴─┘
+                                    ↓
+                                call_model ──should_continue──┬─ "call_tool" ─→ call_tool ┐
+                                    ↑                          │                          │
+                                    └──────────────────────────┼──────────────────────────┘
+                                                               ├─ "review_draft" ─→ review_draft
+                                                               │                       ↓ (interrupt)
+                                                               │                  finalize_answer
+                                                               │                       ↓
+                                                               └─ "end" ─────────────→ END
+```
+
+The review nodes are registered **even when `--approve` is off**, in which case
+`should_continue` never routes to them and they never run (`compile()` checks
+edge targets, not reachability). One graph shape whatever the flags say, so
+toggling approval does not mean a checkpoint written by one shape is resumed by
+another.
+
 ## Tests
 
 ```bash
@@ -347,12 +514,14 @@ src/research_copilot/
   memory.py        conversation history + trim/summarize strategies (Phase 2)
   ingest.py        load -> chunk -> embed -> store (Phase 2)
   retrieval.py     embeddings, Chroma store, retriever, RAG chain (Phase 2)
-  state.py         the graph's State TypedDict + reducer notes (Phase 3)
-  graph.py         the hand-rolled StateGraph: nodes, edges, routing (Phase 3)
+  state.py         the graph's State TypedDict + reducer notes (Phase 3, 4)
+  graph.py         the hand-rolled StateGraph: nodes, edges, routing (Phase 3, 4)
   prebuilt.py      the same agent via create_react_agent, for comparison (Phase 3)
+  checkpointing.py checkpointer factory + the thread_id vs State notes (Phase 4)
   cli.py           command-line entry point
 langgraph.json     tells LangGraph Studio where the graphs are (Phase 3)
 data/chroma/       the local vector store (gitignored, created by `ingest`)
+data/checkpoints.sqlite3  the checkpoint database (gitignored, Phase 4)
 tests/             offline tests using fake models
 ```
 
@@ -404,3 +573,21 @@ to see exactly what changed.
 | `START` / `END` sentinels | `graph.py` → wiring section |
 | Inspecting structure before running | `cli.py` → `cmd_draw_graph` |
 | `create_react_agent` and what it hides | `prebuilt.py` (module docstring) |
+
+## Where each Phase 4 concept lives
+
+| Concept | File |
+| --- | --- |
+| Checkpointers, and what a checkpoint contains | `checkpointing.py` (module docstring) |
+| `thread_id` in `config` vs. content in `State` | `checkpointing.py`, `cli.py` → `_resolve_thread`, `cmd_graph_chat` |
+| `MemorySaver` vs `SqliteSaver` (one interface) | `checkpointing.py` → `checkpointer_scope` |
+| `compile(checkpointer=...)` | `graph.py` → end of `build_graph` |
+| A per-turn budget in per-thread storage | `graph.py` → `turn_input` (`iterations: 0`) |
+| `RemoveMessage` + `add_messages` as deletion | `graph.py` → `prune_history` |
+| Pruning node vs. filtering, and disk vs. state | `graph.py` (Part B docstring), `tests/test_pruning.py` |
+| `interrupt()` and re-running a node on resume | `graph.py` → `review_draft` |
+| `Command(resume=...)` | `graph.py` → `resume_graph` |
+| Reading a thread without running it | `graph.py` → `pending_interrupt` |
+| A draft as state the transcript cannot hold | `state.py` → `draft`, `status`, `ReviewStatus` |
+| Failing closed on an unparseable verdict | `graph.py` → `_parse_verdict` |
+| Splitting iteration counters for Phase 5 | `state.py` (bottom, PHASE 5 NOTE) |

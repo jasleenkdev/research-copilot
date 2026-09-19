@@ -38,6 +38,10 @@ class Settings:
     chroma_dir: Path
     collection_name: str
     retrieval_k: int
+    # Phase 4: persistence and human-in-the-loop
+    checkpointer: str
+    checkpoint_db: Path
+    require_approval: bool
 
 
 def get_settings() -> Settings:
@@ -61,6 +65,21 @@ def get_settings() -> Settings:
         ),
         collection_name=os.getenv("RESEARCH_COPILOT_COLLECTION") or "research_copilot",
         retrieval_k=int(os.getenv("RESEARCH_COPILOT_RETRIEVAL_K") or 4),
+        # "none" reproduces Phase 3 (state dies with the run), "memory" persists
+        # for the life of the process, "sqlite" persists to disk. The default is
+        # sqlite because the interesting Phase 4 behaviour - a conversation that
+        # survives a separate CLI invocation - is only visible on disk.
+        checkpointer=(os.getenv("RESEARCH_COPILOT_CHECKPOINTER") or "sqlite").lower(),
+        checkpoint_db=Path(
+            os.getenv("RESEARCH_COPILOT_CHECKPOINT_DB")
+            or PROJECT_ROOT / "data" / "checkpoints.sqlite3"
+        ),
+        # Whether the graph pauses for human approval before an answer is
+        # committed to the transcript. Off by default so Phases 1-3's commands
+        # behave as they always did; `--approve` and `graph-chat` turn it on.
+        require_approval=(
+            os.getenv("RESEARCH_COPILOT_REQUIRE_APPROVAL", "").lower() == "true"
+        ),
     )
 
 
