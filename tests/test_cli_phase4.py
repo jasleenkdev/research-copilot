@@ -150,7 +150,17 @@ def test_reviewing_an_edit_from_the_command_line(fake_cli, capsys):
 
 
 def test_reviewing_a_rejection_from_the_command_line(fake_cli, capsys):
-    fake_cli("speculative draft")
+    """PHASE 5 changed what this asserts, and the change is the point of Part B.
+
+    In Phase 4 a rejection was an ending: `review --reject` printed a withheld
+    answer and the thread went idle. Phase 5 turns it into a loop, and the CLI
+    defaults `--max-revisions` to 2 - so the same command now spends a revision
+    and parks again on a fresh draft.
+
+    `--max-revisions 0` is how you ask for the old behaviour, and the test below
+    pins it, so both readings stay covered.
+    """
+    fake_cli("speculative draft", "a second attempt")
     thread = "reject-thread"
 
     cli.main(
@@ -162,6 +172,34 @@ def test_reviewing_a_rejection_from_the_command_line(fake_cli, capsys):
     cli.main(
         ["review", "--thread", thread, "--checkpointer", "sqlite",
          "--reject", "--note", "no sources"]
+    )
+    captured = capsys.readouterr()
+
+    # Not an answer - another draft, and the CLI says which revision it is.
+    assert "a second attempt" in captured.out
+    assert "[revised] revision 1" in captured.err
+    assert "feedback:   no sources" in captured.err
+
+
+def test_max_revisions_zero_keeps_the_phase_4_dead_end(fake_cli, capsys):
+    """The resume has to be told the same policy the pause ran under.
+
+    `revisions` is checkpointed; `max_revisions` is a closure in whichever
+    process compiled the graph. That is why `review` takes the flag at all -
+    see the note in cmd_review.
+    """
+    fake_cli("speculative draft")
+    thread = "reject-dead-end"
+
+    cli.main(
+        ["graph-agent", "Q", "--thread", thread, "--checkpointer", "sqlite",
+         "--approve", "--memory", "none", "--max-revisions", "0"]
+    )
+    capsys.readouterr()
+
+    cli.main(
+        ["review", "--thread", thread, "--checkpointer", "sqlite",
+         "--reject", "--note", "no sources", "--max-revisions", "0"]
     )
     captured = capsys.readouterr()
 

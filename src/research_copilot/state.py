@@ -114,8 +114,24 @@ Mode = Literal["knowledge-base", "live-search"]
 # `call_model` sets it back whenever it emits a tool call, so the value always
 # describes the current turn rather than some earlier one.
 #
-# Phase 5 will add a fifth position for the critique loop ("needs_revision"),
-# which is why this is a Literal that can grow and not a bool.
+# PHASE 5: the fifth position Phase 4 predicted ("needs_revision") is
+# deliberately *not* here, and the reason is worth more than the value would
+# have been.
+#
+# "rejected" is a verdict: the reviewer - human or machine - looked at the draft
+# and said no. "needs revision" is a *decision about what to do next*, and the
+# reviewer is not the one who gets to make it: whether a rejection means "try
+# again" or "give up and withhold" depends on how many revisions have already
+# been spent, which is `should_revise`'s job to check against `max_revisions`.
+#
+# Putting that decision in `status` would mean a reviewer writing a value that
+# the routing function then has to override whenever the cap is exhausted - a
+# field that lies about the next step, which is worse than no field. So the
+# reviewers keep saying "approved" / "rejected", and the routing function turns
+# a rejection into either a revision or an ending. Verdicts belong in state;
+# routing belongs in routing functions.
+#
+# The Literal can still grow - that part of the Phase 4 note holds.
 ReviewStatus = Literal["drafting", "awaiting_approval", "approved", "rejected"]
 
 
@@ -209,42 +225,74 @@ class State(TypedDict, total=False):
     # field.
     human_feedback: str
 
-    # --- loop accounting, part two: why one counter will not be enough --------
-    # PHASE 5 NOTE (Part D): where the second iteration counter goes.
+    # --- Phase 5: the two counters, side by side -----------------------------
+    # CONCEPT (Phase 5, Part A): two nested loops need two budgets.
     #
-    # `iterations` above counts *call_model invocations within one turn* - it is
-    # the guard on the call_model <-> call_tool cycle, and `should_continue`
-    # compares it against `max_iterations`. That is the tool loop's budget and
+    # `iterations` above counts *call_model invocations within one turn* - the
+    # guard on the call_model <-> call_tool cycle, compared against
+    # `max_iterations` by `should_continue`. That is the tool loop's budget and
     # nothing else's.
     #
-    # Phase 5 adds a second cycle: draft -> critique -> revise -> critique,
-    # looping until the critic is satisfied or a cap is hit. It is tempting to
-    # reuse `iterations` for that cap, and it is wrong, because the two cycles
-    # are nested and measure different things:
+    # `revisions` below counts *critique -> revise rounds within one turn* - the
+    # guard on the draft -> review -> revise cycle, compared against
+    # `max_revisions` by `should_revise`. Phase 4's note at this spot predicted
+    # the collision; Phase 5 is where it stops being hypothetical.
     #
-    #   one revision attempt may itself run the tool loop several times
-    #     revise -> call_model -> call_tool -> call_model  (iterations 1, 2)
-    #   and the whole thing may then be revised again
-    #     critique -> revise -> call_model -> ...          (iterations 3, 4)
+    # The two cycles are nested, and that is the whole argument for keeping them
+    # apart. One revision attempt may itself run the tool loop several times:
     #
-    # Share the field and three things break at once. The tool-loop cap trips
-    # during revision 2 for work that revision 1 did, so later revisions get less
-    # tool budget than earlier ones - the agent silently gets worse the harder it
-    # tries. The revise cap trips on tool calls, so a single tool-heavy answer
-    # looks like a model that cannot take criticism. And neither number means
-    # anything when you read the final state, because you cannot tell which cycle
-    # spent it.
+    #   revision 1:  start_revision -> call_model -> call_tool -> call_model
+    #   revision 2:  start_revision -> call_model -> call_tool -> call_model
     #
-    # So Phase 5 adds its own key alongside, not instead:
+    # Share one field and three things break at once. The tool cap trips during
+    # revision 2 for work revision 1 did, so later revisions get less tool budget
+    # than earlier ones - the agent silently gets *worse* the harder it tries.
+    # The revise cap trips on tool calls, so one tool-heavy answer looks like a
+    # model that cannot take criticism. And neither number means anything when
+    # you read the final state, because you cannot tell which cycle spent it.
     #
-    #     revisions: int          # how many critique -> revise rounds have run
+    # Hence two keys, two caps, two routing functions:
     #
-    # with its own cap (`max_revisions`, separate from `max_iterations`) and its
-    # own routing function (`should_revise`, separate from `should_continue`).
-    # One more rule comes with it: whichever node begins a revision must reset
-    # `iterations` to 0, exactly as `run_graph` resets it at the start of every
-    # turn (see the note there about a checkpointed counter that never resets).
-    # A per-turn budget that is never reset is a budget that only ever runs out.
+    #     iterations / max_iterations / should_continue    the tool loop
+    #     revisions  / max_revisions  / should_revise      the reflection loop
     #
-    # Deliberately not declared yet - Phase 5 owns it. The note is here so the
-    # collision is a decision already made rather than a bug to be found.
+    # The rule that comes with the split: whichever node *begins* a revision must
+    # reset `iterations` to 0, exactly as `turn_input` resets it at the start of
+    # every turn. `start_revision` in graph.py does this, and `revision_input`
+    # beside `turn_input` is deliberately the same shape of function, because it
+    # is the same idea one level down: a nested budget is per-round, and a budget
+    # that is never reset is a budget that only ever runs out.
+    #
+    # Overwrite is the right reducer, same as `iterations`: `start_revision`
+    # computes the new total itself.
+    revisions: int
+
+    # --- Phase 5: the machine reviewer's verdict ------------------------------
+    # What the critic node said about `draft`, and the exact counterpart of
+    # `human_feedback` above. The two sit side by side on purpose: they are the
+    # same field played by two different reviewers, and `call_model` reads both
+    # when it builds a revision instruction (see `_revision_instruction`).
+    #
+    # Kept separate rather than merged into one `feedback` key because when both
+    # `--critic` and `--approve` are on you genuinely want to know which reviewer
+    # objected. A merged field would let the machine's opinion be mistaken for
+    # the human's in the audit trail, and an approval gate's records should never
+    # be ambiguous about who approved.
+    critique: str
+
+    # --- Phase 5: the plan ----------------------------------------------------
+    # The sub-questions `plan_question` decomposed `question` into, or an empty
+    # list when the question is simple enough not to need decomposing. Empty is
+    # the normal, expected case, not a failure - see the node for why "no plan"
+    # has to be a first-class answer rather than something to retry.
+    #
+    # Deliberately a plain `list[str]` with the default overwrite reducer, not an
+    # accumulating one: a plan is replanned wholesale, never appended to. Each
+    # turn produces its own plan and `turn_input` clears it.
+    #
+    # Deliberately *not* a list of (sub_question, answer) pairs. That would be
+    # multi-question orchestration - fan out, answer each, merge - which is
+    # Phase 6's Researcher agent, not this phase. Here the sub-questions are
+    # advisory: `retrieve_docs` retrieves for each of them and `call_model` is
+    # handed the list as a checklist. One model call still writes one answer.
+    sub_questions: list[str]

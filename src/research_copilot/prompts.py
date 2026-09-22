@@ -149,3 +149,124 @@ RAG_PROMPT = ChatPromptTemplate.from_messages(
         ("human", "Context:\n{context}\n\nQuestion: {question}"),
     ]
 )
+
+
+# --- Phase 5: reflection (critique -> revise) ---------------------------------
+
+# CONCEPT: an LLM in the reviewer's seat
+# `review_draft` puts a *question* to a human and waits. `critique_draft` puts
+# the same question to a model and doesn't. For the two to be interchangeable,
+# the model's reply has to reduce to the same thing a human's verdict reduces
+# to: a decision, plus a reason.
+#
+# Hence the rigid first line. The critic is asked for APPROVE or REJECT on its
+# own line, and everything after it is the reason - which is exactly the
+# `{"decision": ..., "note": ...}` shape `review_draft` already parses. The
+# parsing lives in `_parse_critique` in graph.py, and it hands its result to the
+# same `_parse_verdict` the human path uses, so an unreadable critique fails
+# closed the same way an unreadable human verdict does.
+#
+# Why not PydanticOutputParser here, given schemas.py exists? Two reasons worth
+# knowing. A verdict is one enum and one string, so a schema buys little beyond
+# what a first-line convention already gives. And a parse failure on this path
+# is not free: it fails closed to "reject", which spends a revision round. The
+# looser format fails less often, and `max_revisions` is what bounds the damage
+# when it does. Phase 6's Critic *agent*, whose verdict routes a supervisor
+# rather than a single edge, is where structured output starts earning its cost.
+#
+# The instruction to be specific is load-bearing, not politeness. "Too vague"
+# is a critique `call_model` cannot act on, so the revision comes back the same
+# and the loop burns its whole budget rediscovering that. Asking for concrete,
+# addressable objections is the difference between a reflection loop and an
+# expensive no-op.
+CRITIC_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a demanding but fair reviewer of research answers. You are "
+            "reviewing a draft written by another assistant. You are not "
+            "rewriting it - you are deciding whether it is good enough to send.\n\n"
+            "Judge it on:\n"
+            "- Does it actually answer the question that was asked?\n"
+            "- Are claims supported, and are sources real and cited where they "
+            "matter?\n"
+            "- Is speculation labelled as speculation?\n"
+            "- Are there obvious gaps, errors, or unsupported leaps?\n\n"
+            "Reply in exactly this format:\n"
+            "First line: APPROVE or REJECT, alone on the line.\n"
+            "Then, if you rejected it, say what is wrong in concrete terms the "
+            "writer can act on: name the claim that needs support, the part of "
+            "the question left unanswered, the source that is missing. Do not "
+            "write vague notes like 'needs more detail' - a note the writer "
+            "cannot act on wastes a revision.\n\n"
+            "Approve a draft that is good enough. Holding out for perfect costs "
+            "revisions and gets you nothing.",
+        ),
+        (
+            "human",
+            "Question: {question}\n\n"
+            "Sub-questions the plan called for (may be empty):\n{sub_questions}\n\n"
+            "Draft answer:\n{draft}",
+        ),
+    ]
+)
+
+# The instruction `call_model` receives when it is re-drafting rather than
+# drafting. Not a ChatPromptTemplate: it is rendered into a SystemMessage that
+# `call_model` splices into a request it is already assembling by hand, and both
+# modes (knowledge-base and live-search) need the same text even though they
+# build completely different requests around it. A template would have to be
+# invoked twice from two different places to produce one string.
+REVISION_INSTRUCTIONS = (
+    "You are revising an answer you already wrote. It was reviewed and sent "
+    "back. This is revision attempt {attempt} of at most {cap}.\n\n"
+    "Your previous draft:\n{draft}\n\n"
+    "What the reviewers said:\n{feedback}\n\n"
+    "Write a new, complete answer that addresses the feedback. Do not reply to "
+    "the reviewers, do not explain what you changed, and do not apologise - "
+    "produce the answer itself, in full, as if writing it for the first time. "
+    "If a criticism is too vague to act on, or you believe it is wrong, say so "
+    "briefly inside the answer and make the best version you can rather than "
+    "returning the same draft unchanged."
+)
+
+
+# --- Phase 5: planning --------------------------------------------------------
+
+# CONCEPT: decomposition before research
+# A question like "how do RAG and long-context models compare on cost and
+# accuracy?" is really four questions. A single retrieval against the whole
+# sentence finds chunks that are vaguely about all of it and precisely about
+# none of it; a single tool call searches for one blurry thing. Splitting first
+# gives the retriever and the tool loop narrower targets.
+#
+# The instruction that matters most is the one telling the model *not* to split.
+# A model asked to decompose will always decompose - it will turn "who wrote the
+# BERT paper?" into four sub-questions and turn one cheap lookup into four. So
+# NONE is a first-class answer with its own line in the format, and the prompt
+# says plainly that most questions deserve it. A planner that never declines to
+# plan is a cost multiplier, not a planner.
+PLAN_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You break research questions into sub-questions, but only when "
+            "that genuinely helps.\n\n"
+            "Most questions do not need it. A question needs decomposing only "
+            "when it has several distinct parts that would be researched "
+            "separately - a comparison across several dimensions, a question "
+            "with a prerequisite that must be established first, or one that "
+            "spans clearly different topics.\n\n"
+            "Reply in exactly this format:\n"
+            "- If the question is best researched as a single question, reply "
+            "with the single word NONE and nothing else.\n"
+            "- Otherwise reply with one sub-question per line, each starting "
+            "with '- ', and nothing else. No preamble, no numbering, no "
+            "commentary. Give at most {max_sub_questions}.\n\n"
+            "Each sub-question must be self-contained and answerable on its "
+            "own: no pronouns pointing back at the original question, no 'the "
+            "above'. They will be searched independently.",
+        ),
+        ("human", "Question: {question}\n\nResearch mode: {mode}"),
+    ]
+)

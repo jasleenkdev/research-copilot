@@ -42,6 +42,10 @@ class Settings:
     checkpointer: str
     checkpoint_db: Path
     require_approval: bool
+    # Phase 5: reflection and planning
+    enable_critic: bool
+    max_revisions: int
+    enable_planning: bool
 
 
 def get_settings() -> Settings:
@@ -79,6 +83,26 @@ def get_settings() -> Settings:
         # behave as they always did; `--approve` and `graph-chat` turn it on.
         require_approval=(
             os.getenv("RESEARCH_COPILOT_REQUIRE_APPROVAL", "").lower() == "true"
+        ),
+        # Phase 5. Both reviewers are off by default, as in Phase 4: turning a
+        # phase on should be a visible act, so an existing command's output does
+        # not change under it.
+        enable_critic=(
+            os.getenv("RESEARCH_COPILOT_CRITIC", "").lower() == "true"
+        ),
+        # The reflection loop's cap, entirely separate from the tool loop's
+        # `--max-iterations`. Two nested loops, two budgets - see the `revisions`
+        # note in state.py.
+        #
+        # Note this is the *CLI's* default, not the library's:
+        # `build_graph(max_revisions=...)` defaults to 0 so that a Phase 4 caller
+        # behaves exactly as before. On the command line 0 would make `--critic`
+        # a reviewer with a veto and no way to ask for a fix, so the default here
+        # is 2 - enough for a critic to be useful, small enough that a critic
+        # which always rejects costs three drafts rather than a runaway bill.
+        max_revisions=int(os.getenv("RESEARCH_COPILOT_MAX_REVISIONS") or 2),
+        enable_planning=(
+            os.getenv("RESEARCH_COPILOT_PLAN", "").lower() == "true"
         ),
     )
 

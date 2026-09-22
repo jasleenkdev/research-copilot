@@ -26,7 +26,7 @@ next, not to ship the final system as fast as possible.
   `SqliteSaver`), a `prune_history` node that keeps the *persisted* transcript
   in budget with `RemoveMessage`, and `interrupt()` for human approval before an
   answer is finalized.
-- [ ] **Phase 5: Multi-step reasoning.** A reflection loop (draft → critique →
+- [x] **Phase 5: Multi-step reasoning.** A reflection loop (draft → critique →
   revise, looping back until a quality threshold or max iterations) and a
   planning node that splits the question into sub-questions before research.
 - [ ] **Phase 6: Multi-agent.** Researcher, Writer, and Critic nodes coordinated
@@ -181,6 +181,7 @@ Two conditional edges, and they are the first real branching in the project:
 | --- | --- | --- | --- |
 | `route_by_mode` | which research strategy | the `mode` field | Phase 6's Supervisor |
 | `should_continue` | whether the tool loop continues | the last message's `tool_calls` | Phase 5's reflection loop |
+| `should_revise` (Phase 5) | whether a rejected draft is revised | `status` + the `revisions` cap | Phase 6's Supervisor routing a critique to an agent |
 
 `route_by_mode` sits at the **entry**, not after `call_model`, because retrieval
 has to happen before the model speaks — the knowledge-base path's whole promise
@@ -490,6 +491,222 @@ edge targets, not reachability). One graph shape whatever the flags say, so
 toggling approval does not mean a checkpoint written by one shape is resumed by
 another.
 
+## Usage (Phase 5)
+
+Phase 5 adds no commands, only flags on the graph commands. That is the point:
+reflection is not a different way of using the system, it is more edges inside
+the same graph.
+
+```bash
+# A model reviews the draft before it is finalized. No checkpointer needed.
+research-copilot graph-agent "Is RAG obsolete with long-context models?" \
+  --critic --max-revisions 2
+
+# Human review only - Phase 4, unchanged.
+research-copilot graph-agent "..." --thread t1 --approve
+
+# Both. The critic reviews first; the human is asked only about drafts it passed.
+research-copilot graph-agent "..." --thread t1 --critic --approve
+
+# Decompose the question before researching it.
+research-copilot graph-agent "Compare RAG and long context on cost and accuracy" \
+  --plan --mode knowledge-base
+```
+
+### Part A: two loops, two counters
+
+The graph now has two cycles, nested:
+
+| loop | cycle | counter | cap | routing function |
+| --- | --- | --- | --- | --- |
+| tool | `call_model` ↔ `call_tool` | `iterations` | `max_iterations` | `should_continue` |
+| reflection | `call_model` → review → `start_revision` | `revisions` | `max_revisions` | `should_revise` |
+
+They share nothing but the turn they live in. One revision attempt can itself
+run the tool loop several times, so a shared counter would make the tool cap
+trip during revision 2 for work revision 1 did — the agent would get quietly
+*worse* the harder it tried — and neither number would mean anything in the
+final state, because you could not tell which cycle spent it.
+
+The rule the split forces: whoever begins a revision resets `iterations` to 0.
+`start_revision` does that via `revision_input`, which sits beside `turn_input`
+because it is the same pattern one level down. A per-round budget that is never
+reset is a budget that only ever runs out.
+
+In a state dump the two numbers read together: `revisions: 2, iterations: 1`
+means the second revision has made one model call — not that three have
+happened.
+
+### Part B: `should_revise`, and a cap that overrules the verdict
+
+Phase 4's rejection was a dead end. Now it is an edge: `should_revise` sends a
+rejected draft back through `start_revision` to `call_model`, with the critique
+and the human's note carried in state as the revision instruction.
+
+**Unless the cap is spent, in which case the run ends although the verdict still
+says reject.** That override is the substance of the function, not a corner of
+it. A reflection loop's exit condition is supplied by the thing the loop is
+meant to be checking, and a critic prompted to find fault will find some —
+there is always another caveat to want. No reviewer can emit a verdict meaning
+"and I promise to stop asking", because that promise is not the kind of thing a
+judgement contains. So the loop counts its own attempts and stops on its own
+authority: **the verdict decides whether the answer is good, the cap decides
+when we are done spending.** Anything that loops on a judgement it did not make
+needs a bound it controls itself.
+
+The exhausted branch routes to `finalize_answer`, not to `END` directly:
+"stop looping" and "leave the transcript valid" are two requirements, and
+ending without `finalize_answer` would leave the opening `HumanMessage`
+unanswered — two adjacent human turns, which the Anthropic API rejects.
+
+### Part C: the critic is the human, structurally
+
+| | `review_draft` | `critique_draft` |
+| --- | --- | --- |
+| reads | `draft` | `draft` |
+| asks | a human | a model |
+| mechanism | `interrupt()` | `chain.invoke()` |
+| parses with | `_parse_verdict` | `_parse_critique` → `_parse_verdict` |
+| writes | `status` + `human_feedback` | `status` + `critique` |
+| routes into | `should_revise` | `should_revise` |
+
+Everything load-bearing is in the identical rows. A reviewer is structurally
+just something that turns a draft into an approve/reject verdict; the graph
+routes on the verdict and is indifferent to where it came from. That is why
+human-in-the-loop was worth building first even though it is the less automatic
+feature — the pattern covers a person at a terminal, a model, a test suite, a
+schema validator, or (Phase 6) an agent with its own tools.
+
+**The one real asymmetry:** only the human pauses. `interrupt()` needs a
+checkpointer to park a run in, so `--approve` without one is refused at build
+time. `--critic` needs nothing; a model call blocks and returns.
+
+Both reviewers share `should_revise` but declare different `path_map`s — each
+source lists the destinations reachable *from it*, so the drawn graph shows no
+paths a run cannot take.
+
+### Ordering, when both reviewers are on
+
+Worth deciding explicitly rather than falling into. **The critic goes first.**
+
+- **For:** the critic is cheap, automatic and available at 3am; the human is
+  none of those, so filtering with the expendable reviewer before spending the
+  scarce one is the whole reason to have two. It also keeps the human's word
+  final — human-first would mean a model overturning a person's approval.
+- **Against:** the human never sees the drafts the critic rejected, so a critic
+  with bad taste silently narrows what reaches a person. Worse, with a critic
+  that never approves the revision cap is spent *before* the interrupt is ever
+  hit: the run ends withheld and `--approve` looks like it did nothing. The CLI
+  prints a warning for exactly that, and `test_a_critic_that_never_approves_means_the_human_is_never_asked`
+  pins it as behaviour rather than leaving it a surprise.
+
+Human-first is a one-line change (swap the branch in `should_continue` and the
+`"awaiting_approval"` case in `should_revise`).
+
+### Failing closed, in two directions
+
+`_parse_critique` hands its result to the same `_parse_verdict` the human path
+uses, so an unreadable critique fails closed exactly as an unreadable human
+verdict does — but the *cost* differs, and so does the right default elsewhere:
+
+| parser | unreadable input means | costs |
+| --- | --- | --- |
+| `_parse_verdict` | reject | a retry, vs. publishing something nobody approved |
+| `_parse_critique` | reject | one revision round, bounded by `max_revisions` |
+| `_parse_plan` | **no plan** | nothing — the run behaves exactly as Phase 4 |
+
+The planner is the odd one out on purpose. Failing closed means failing towards
+*doing less*, and for a planner "less" is no decomposition — inventing
+sub-questions that then drive retrieval and tool calls would be failing open.
+
+A consequence worth knowing: a critic whose output format drifts becomes a
+critic that always rejects, and the symptom is a run that always exhausts its
+revisions. The raw reply is kept as the note so that is diagnosable from a state
+dump.
+
+### Part D: planning
+
+`plan_question` runs between pruning and the mode branch and writes
+`sub_questions` — very often an empty list, which is a *result*, not a failure.
+Most of the prompt is about when **not** to decompose, because a model asked to
+split a question will split it: "who wrote the BERT paper?" comes back as four
+sub-questions and one cheap lookup becomes four.
+
+The plan is advisory. `retrieve_docs` retrieves once per sub-question as well as
+for the whole question (question first, duplicates dropped, so a bad plan can
+only ever *add* chunks), and `call_model` gets the list as a checklist. There is
+no fan-out and no per-sub-question orchestration — one model call still writes
+one answer. That is Phase 6's Researcher.
+
+Two interactions are **noted but not solved**, because neither is load-bearing
+for Parts A–C:
+
+- **knowledge-base mode.** `n` sub-questions means up to `(1 + n) * k` chunks.
+  `prune_history`'s budget does not cover `context` (it is built per call and
+  never enters `messages`), so nothing currently stops a wide plan from
+  producing a very large prompt.
+- **live-search mode.** Sub-questions are paid for out of `max_iterations`. A
+  plan with 4 sub-questions against a cap of 6 leaves little room to iterate on
+  any of them, and nothing couples the two numbers. `--max-sub-questions`' cap
+  is the blunt instrument in the meantime.
+
+### The graph now
+
+```
+START ─→ prune_history ─→ plan_question ──route_by_mode──┬─ "knowledge-base" ─→ retrieve_docs ─┐
+                                                         └─ "live-search" ───────────────────┐ │
+                                    ┌────────────────────────────────────────────────────────┴─┘
+                                    ↓
+ ┌──────────────────────────→  call_model ──should_continue──┬─ "call_tool" ─→ call_tool ┐
+ │                                  ↑                         │                          │
+ │                                  └─────────────────────────┼──────────────────────────┘
+ │                                                            ├─ "critique_draft" ─→ critique_draft
+ │                                                            ├─ "review_draft" ──→ review_draft
+ │                                                            └─ "end" ─────────────────→ END
+ │                                                                     │       │
+ │                                  both route through should_revise ──┴───────┘
+ │                                              │
+ │  start_revision ←── "start_revision" ────────┤
+ └────────┘                                     ├── "review_draft" ─→ review_draft   (critic passed;
+                                                │                                     human still owes
+                                                │                                     a verdict)
+                                                └── "finalize_answer" ─→ finalize_answer ─→ END
+```
+
+All five Phase 4/5 optional nodes are registered **whatever the flags say**.
+`plan_question` is on the unconditional path and returns `{}` when planning is
+off; the review nodes are simply unreachable. Flags choose paths, not
+structures — so a checkpoint written under one set of flags is not resumed by a
+different graph.
+
+### What needs a real `ANTHROPIC_API_KEY`
+
+The fakes pin down mechanics — where the run goes after a verdict, which
+counter moves, whether the cap saves you. They can say nothing about output
+*quality*, which is the whole question Phase 5 raises:
+
+1. **Do critiques come back specific enough to act on?** A critique like "needs
+   more detail" is one `call_model` cannot use, so the revision returns
+   unchanged and the loop burns its budget rediscovering that. This is the
+   single most important thing to check, because it is the difference between a
+   reflection loop and an expensive no-op.
+2. **Do revised drafts actually improve?** Run the same question with
+   `--max-revisions 0` and `--max-revisions 2` and read both. Reflection is
+   widely assumed to help and does not always.
+3. **Does the critic ever approve?** A real model on a real prompt may reject
+   everything, in which case every run exhausts its cap and `--critic` is pure
+   cost. Check the approve rate before trusting the feature.
+4. **Does the first-line format hold?** `_parse_critique` fails closed to
+   "reject", so format drift is indistinguishable from a harsh critic.
+5. **Does the planner decline to plan?** Ask something simple and confirm you
+   get `NONE`. A planner that always plans is a cost multiplier.
+6. **`--critic --approve` on a real thread**, to see the critic actually filter
+   before a human is asked — and to confirm the withheld-after-N-revisions path
+   reads clearly when it happens for real.
+7. **Token cost.** `--critic --plan` on a live-search question is up to
+   `1 + n` planner/retrieval calls plus a critic call per round plus the tool
+   loop per round. Watch a LangSmith trace once before leaving it on.
+
 ## Tests
 
 ```bash
@@ -523,6 +740,7 @@ langgraph.json     tells LangGraph Studio where the graphs are (Phase 3)
 data/chroma/       the local vector store (gitignored, created by `ingest`)
 data/checkpoints.sqlite3  the checkpoint database (gitignored, Phase 4)
 tests/             offline tests using fake models
+                   test_reflection.py / test_planning.py are Phase 5
 ```
 
 `agent_loop.py` and `retrieval.py` stay in place on purpose. `graph.py` is
@@ -590,4 +808,23 @@ to see exactly what changed.
 | Reading a thread without running it | `graph.py` → `pending_interrupt` |
 | A draft as state the transcript cannot hold | `state.py` → `draft`, `status`, `ReviewStatus` |
 | Failing closed on an unparseable verdict | `graph.py` → `_parse_verdict` |
-| Splitting iteration counters for Phase 5 | `state.py` (bottom, PHASE 5 NOTE) |
+| Splitting iteration counters for Phase 5 | `state.py` → `revisions` |
+
+## Where each Phase 5 concept lives
+
+| Concept | File |
+| --- | --- |
+| Two nested loops, two counters, two caps | `state.py` → `revisions`; `graph.py` → `revision_input` |
+| Resetting a nested budget per round | `graph.py` → `start_revision`, `revision_input` |
+| A cap that must overrule a verdict | `graph.py` → `should_revise` |
+| Rejection as an edge rather than an ending | `graph.py` → wiring, `critique_draft`/`review_draft` edges |
+| Critic-as-reviewer symmetry | `graph.py` → `critique_draft` (docstring) |
+| Why the reviewers' `path_map`s differ | `graph.py` → wiring section |
+| One verdict shape, two reviewers | `graph.py` → `_parse_critique` → `_parse_verdict` |
+| Failing closed in two directions | `graph.py` → `_parse_critique` vs `_parse_plan` |
+| Ordering when both reviewers are on | `graph.py` → `critique_draft`; `cli.py` → `_announce_review_setup` |
+| How a critique reaches the writer | `graph.py` → `_revision_instruction` |
+| Why a verdict is not a routing decision | `state.py` → `ReviewStatus` |
+| Decomposition, and declining to decompose | `graph.py` → `plan_question`; `prompts.py` → `PLAN_PROMPT` |
+| Config a resume must repeat (closures vs State) | `cli.py` → `cmd_review` |
+| What Phase 6 needs on top of this | `graph.py` (bottom, PHASE 6 NOTE) |

@@ -25,6 +25,15 @@ Phase 4 commands:
 
 `graph-agent` also gains --thread, --checkpointer and --approve, which is what
 makes two separate CLI invocations continue the same conversation.
+
+Phase 5 adds no commands, only flags on the graph commands:
+  --critic         a model reviews each draft (the --approve gate, automated)
+  --max-revisions  how many critique -> revise rounds a turn may spend
+  --plan           decompose the question into sub-questions before research
+
+That there is no new command is the point. Reflection is not a different way of
+using the system, it is more edges inside the same graph, so it shows up as
+flags on the commands that already run it.
 """
 
 import argparse
@@ -271,6 +280,20 @@ def _print_final_state(state: dict) -> None:
         print(f"  draft:      {state['draft'][:70]}...", file=sys.stderr)
     if state.get("human_feedback"):
         print(f"  feedback:   {state.get('human_feedback')}", file=sys.stderr)
+    # Phase 5. `revisions` is printed beside `iterations` on purpose: seeing the
+    # two numbers side by side in every dump is the fastest way to internalise
+    # that they count different loops. `iterations` is the *current* round's
+    # tool budget, reset by start_revision - so "revisions 2, iterations 1"
+    # means the second revision has made one model call, not that three calls
+    # have happened in total.
+    if state.get("revisions"):
+        print(f"  revisions:  {state['revisions']}", file=sys.stderr)
+    if state.get("critique"):
+        print(f"  critique:   {state['critique'][:70]}", file=sys.stderr)
+    if state.get("sub_questions"):
+        print(f"  plan:       {len(state['sub_questions'])} sub-questions", file=sys.stderr)
+        for i, sub_question in enumerate(state["sub_questions"], start=1):
+            print(f"    [{i}] {sub_question}", file=sys.stderr)
     if state.get("summary"):
         print(f"  summary:    {state['summary'][:70]}...", file=sys.stderr)
 
@@ -333,6 +356,62 @@ def _print_pending(payload: dict) -> None:
     print("--- end draft ---")
 
 
+# --- Phase 5: reflection and planning -----------------------------------------
+
+
+def _phase5_build_kwargs(
+    *, critic: bool, max_revisions: int | None, plan: bool
+) -> dict:
+    """Resolve the Phase 5 flags into build_graph arguments, and warn.
+
+    `--max-revisions` defaults to the setting (2) rather than to
+    `build_graph`'s own default (0). The two defaults differ on purpose: a
+    library caller who passes nothing should get Phase 4's behaviour unchanged,
+    while on the command line `--critic --max-revisions 0` is a reviewer that
+    can veto but never ask for a fix, which nobody means to ask for.
+    """
+    settings = get_settings()
+    resolved = (
+        settings.max_revisions if max_revisions is None else max_revisions
+    )
+
+    if critic and resolved <= 0:
+        print(
+            "[warning] --critic with --max-revisions 0: the critic can reject "
+            "a draft but the run has no budget to revise it, so a rejection "
+            "goes straight to a withheld answer.",
+            file=sys.stderr,
+        )
+
+    return {
+        "enable_critic": critic,
+        "max_revisions": resolved,
+        "enable_planning": plan,
+    }
+
+
+def _announce_review_setup(*, critic: bool, approve: bool, max_revisions: int) -> None:
+    """Say out loud which reviewers are on, and in what order.
+
+    Worth printing rather than leaving implicit, because the ordering has a
+    consequence that is invisible from the outside: with both reviewers on, the
+    human is asked only about drafts the critic passed, so a critic that never
+    approves means `--approve` never pauses and the run just ends with a
+    withheld draft. That looks like a bug in the approval gate and isn't.
+    """
+    if critic and approve:
+        print(
+            f"[review] critic, then human (max {max_revisions} revisions). "
+            "A draft the critic keeps rejecting never reaches you - the run "
+            "ends withheld once the revision cap is spent.",
+            file=sys.stderr,
+        )
+    elif critic:
+        print(f"[review] critic only (max {max_revisions} revisions)", file=sys.stderr)
+    elif approve:
+        print(f"[review] human only (max {max_revisions} revisions)", file=sys.stderr)
+
+
 def cmd_graph_agent(
     question: str,
     mode: str,
@@ -343,6 +422,9 @@ def cmd_graph_agent(
     approve: bool = False,
     memory_strategy: str | None = None,
     max_history_tokens: int | None = None,
+    critic: bool = False,
+    max_revisions: int | None = None,
+    plan: bool = False,
 ) -> None:
     """One turn of the graph, optionally against a persistent thread.
 
@@ -358,12 +440,20 @@ def cmd_graph_agent(
         thread, is_new = _resolve_thread(thread_id)
         _announce_thread(thread, is_new, saver)
 
+        phase5 = _phase5_build_kwargs(
+            critic=critic, max_revisions=max_revisions, plan=plan
+        )
+        _announce_review_setup(
+            critic=critic, approve=approve, max_revisions=phase5["max_revisions"]
+        )
+
         graph = build_graph(
             max_iterations=max_iterations,
             checkpointer=saver,
             require_approval=approve,
             memory_strategy=memory_strategy,
             max_history_tokens=max_history_tokens,
+            **phase5,
         )
         state = run_graph(question, mode=mode, graph=graph, thread_id=thread)
 
@@ -390,6 +480,9 @@ def cmd_graph_chat(
     approve: bool = False,
     memory_strategy: str | None = None,
     max_history_tokens: int | None = None,
+    critic: bool = False,
+    max_revisions: int | None = None,
+    plan: bool = False,
 ) -> None:
     """Phase 2's `chat`, rebuilt on the checkpointer instead of a local object.
 
@@ -417,12 +510,20 @@ def cmd_graph_chat(
         thread, is_new = _resolve_thread(thread_id)
         _announce_thread(thread, is_new, saver)
 
+        phase5 = _phase5_build_kwargs(
+            critic=critic, max_revisions=max_revisions, plan=plan
+        )
+        _announce_review_setup(
+            critic=critic, approve=approve, max_revisions=phase5["max_revisions"]
+        )
+
         graph = build_graph(
             max_iterations=max_iterations,
             checkpointer=saver,
             require_approval=approve,
             memory_strategy=memory_strategy,
             max_history_tokens=max_history_tokens,
+            **phase5,
         )
 
         print("\nType /state to dump the persisted state, /exit to quit.\n")
@@ -446,8 +547,17 @@ def cmd_graph_chat(
 
             state = run_graph(user_input, mode=mode, graph=graph, thread_id=thread)
 
-            if "__interrupt__" in state:
+            # PHASE 5: `while`, not `if`. A rejection no longer ends the turn -
+            # it starts a revision, which produces another draft, which parks at
+            # `interrupt()` again. The loop is bounded by `max_revisions` inside
+            # the graph, so this cannot spin: once the cap is spent
+            # `should_revise` routes to `finalize_answer` and no further
+            # interrupt arrives.
+            while "__interrupt__" in state:
                 _print_pending(state["__interrupt__"][0].value)
+                revisions = state.get("revisions", 0)
+                if revisions:
+                    print(f"(revision {revisions})", file=sys.stderr)
                 verdict = _prompt_for_verdict()
                 state = resume_graph(graph, verdict, thread_id=thread)
 
@@ -482,6 +592,8 @@ def cmd_review(
     text: str = "",
     note: str = "",
     max_iterations: int = 6,
+    critic: bool = False,
+    max_revisions: int | None = None,
 ) -> None:
     """Show a paused thread and resume it with a verdict. (Part C)
 
@@ -493,6 +605,20 @@ def cmd_review(
     Note that the graph is rebuilt here from scratch. A compiled graph is
     stateless - the conversation lives in the checkpointer, not in the object -
     so "the same graph" only has to mean "the same shape and the same saver".
+
+    PHASE 5 sharpens that "only", and it is the sort of thing you find by
+    building the loop rather than by reading about it. Shape is not the whole
+    story once a routing function closes over a number. `should_revise` compares
+    `revisions` against the `max_revisions` captured *in this process*, not the
+    one the run was started with - the counter is checkpointed, the cap is not.
+    Resume a thread here with the default cap and a rejection that should have
+    started a revision quietly becomes a withheld answer instead.
+
+    Hence `--max-revisions` and `--critic` on this command too: a resume has to
+    be told the same policy the pause was started under. The general rule, worth
+    carrying into Phase 6 - anything a routing function reads from a closure is
+    configuration the caller must repeat on every process that touches the
+    thread, because only State survives.
     """
     with checkpointer_scope(checkpointer) as saver:
         if saver is None:
@@ -507,6 +633,9 @@ def cmd_review(
             max_iterations=max_iterations,
             checkpointer=saver,
             require_approval=True,
+            **_phase5_build_kwargs(
+                critic=critic, max_revisions=max_revisions, plan=False
+            ),
         )
 
         snapshot = graph.get_state(thread_config(thread_id))
@@ -547,6 +676,21 @@ def cmd_review(
         # CONCEPT: Command(resume=...) goes where a state dict normally goes.
         state = resume_graph(graph, verdict, thread_id=thread_id)
         print()
+
+        # PHASE 5: a rejection may now have started a revision rather than ended
+        # the run, in which case the graph is parked at the *next* interrupt
+        # with a fresh draft. Say so - "here is another draft" and "here is the
+        # answer" look identical otherwise.
+        if "__interrupt__" in state:
+            _print_pending(state["__interrupt__"][0].value)
+            print(
+                f"\n[revised] revision {state.get('revisions', 0)}; review again "
+                f"with: research-copilot review --thread {thread_id}",
+                file=sys.stderr,
+            )
+            _print_final_state(state)
+            return
+
         print(final_answer(state))
         _print_final_state(state)
 
@@ -670,9 +814,57 @@ def _add_phase4_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_phase5_flags(parser: argparse.ArgumentParser) -> None:
+    """Phase 5's reviewers and planner.
+
+    `--critic` is the deliberate counterpart to Phase 4's `--approve`: the same
+    approve/reject gate with a model in the reviewer's seat. Having them as two
+    independent switches is what makes the four combinations runnable, which is
+    the point of the phase -
+
+        (neither)            Phase 4 with approval off: draft, commit, done.
+        --approve            a human gate. Pauses at interrupt(); needs a
+                             checkpointer.
+        --critic             a machine gate. No pause, no checkpointer needed.
+        --critic --approve   both, critic first. The human is asked only about
+                             drafts the critic passed.
+
+    - and the four combinations run over *one graph shape*, because the review
+    nodes are registered whatever the flags say. The flags choose paths, not
+    structures.
+    """
+    parser.add_argument(
+        "--critic",
+        action="store_true",
+        help=(
+            "Have a model review each draft before it is finalized. Combine "
+            "with --approve to put a human after the critic."
+        ),
+    )
+    parser.add_argument(
+        "--max-revisions",
+        type=int,
+        default=None,
+        help=(
+            "How many critique -> revise rounds one turn may spend. Separate "
+            "from --max-iterations, which caps the tool loop *inside* each "
+            "round. 0 means a rejection ends the run (Phase 4 behaviour). "
+            "Defaults to RESEARCH_COPILOT_MAX_REVISIONS."
+        ),
+    )
+    parser.add_argument(
+        "--plan",
+        action="store_true",
+        help=(
+            "Decompose the question into sub-questions before research. Most "
+            "questions come back undecomposed; that is the planner working."
+        ),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="research-copilot", description="Research Copilot (Phases 1-4)"
+        prog="research-copilot", description="Research Copilot (Phases 1-5)"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -758,6 +950,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     graph_parser.add_argument("--max-iterations", type=int, default=6)
     _add_phase4_flags(graph_parser)
+    _add_phase5_flags(graph_parser)
     graph_parser.add_argument(
         "--thread",
         default=None,
@@ -788,6 +981,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     chat_graph_parser.add_argument("--max-iterations", type=int, default=6)
     _add_phase4_flags(chat_graph_parser)
+    _add_phase5_flags(chat_graph_parser)
 
     review_parser = subparsers.add_parser(
         "review",
@@ -814,6 +1008,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     review_parser.add_argument(
         "--note", default="", help="Why, recorded in State['human_feedback']"
+    )
+    # Phase 5: the resume has to be told the same policy the pause ran under.
+    # `revisions` is checkpointed; `max_revisions` is a closure in this process.
+    # See the note in cmd_review.
+    review_parser.add_argument(
+        "--max-revisions",
+        type=int,
+        default=None,
+        help=(
+            "Must match the run that produced the draft: a rejection starts a "
+            "revision only if this process allows one."
+        ),
+    )
+    review_parser.add_argument(
+        "--critic",
+        action="store_true",
+        help="Match a run started with --critic, so revised drafts are critiqued too",
     )
 
     threads_parser = subparsers.add_parser(
@@ -860,6 +1071,9 @@ def main(argv: list[str] | None = None) -> int:
                 approve=args.approve,
                 memory_strategy=args.memory_strategy,
                 max_history_tokens=args.max_history_tokens,
+                critic=args.critic,
+                max_revisions=args.max_revisions,
+                plan=args.plan,
             )
         elif args.command == "graph-chat":
             cmd_graph_chat(
@@ -870,6 +1084,9 @@ def main(argv: list[str] | None = None) -> int:
                 approve=args.approve,
                 memory_strategy=args.memory_strategy,
                 max_history_tokens=args.max_history_tokens,
+                critic=args.critic,
+                max_revisions=args.max_revisions,
+                plan=args.plan,
             )
         elif args.command == "review":
             decision = None
@@ -885,6 +1102,8 @@ def main(argv: list[str] | None = None) -> int:
                 decision=decision,
                 text=args.edit or "",
                 note=args.note,
+                critic=args.critic,
+                max_revisions=args.max_revisions,
             )
         elif args.command == "threads":
             cmd_threads(args.checkpointer)
