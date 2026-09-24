@@ -34,7 +34,8 @@ next, not to ship the final system as fast as possible.
   tools and system prompt. Built in four reviewed steps:
   - [x] 6.1 Researcher (subgraph, private tool loop) → Writer (node), fixed
     hand-off, one owner per state field
-  - [ ] 6.2 Supervisor routing via structured output
+  - [x] 6.2 Supervisor routing via structured output, with code guards,
+    a decision log, and the Researcher's brief/outcome/merge-on-rerun contract
   - [ ] 6.3 Critic agent with its own tools; per-agent budgets
   - [ ] 6.4 CLI flags (`--critic`/`--approve`/`--plan`), threads, Studio
 - [ ] **Phase 7: Production.** Streaming via `astream_events`, per-node error
@@ -902,6 +903,77 @@ kept out of the shared transcript, out of the Writer's input, and out of
 its own namespace (`researcher:<task-id>`), and those checkpoints hold every
 search result.
 
+## Usage (Phase 6.2)
+
+The fixed line is now a hub. Every agent reports back to a Supervisor, which
+decides who acts next from a structured model reply:
+
+```
+START → plan_question → supervisor ⇄ researcher
+                            ⇅
+                          writer
+                            ↓ finish
+                     finalize_answer → END
+```
+
+```bash
+research-copilot multi-agent "How are RAG pipelines evaluated?"            # a model routes
+research-copilot multi-agent "..." --routing fixed                         # 6.1's path, no model
+research-copilot multi-agent "..." --max-researcher-runs 3 --max-writer-runs 1
+```
+
+Each decision is printed with its rationale. Any override is printed beside
+what the model proposed:
+
+```
+  [supervisor] -> researcher  brief='evidence RAGAS agrees with human judgement'
+      why: Draft makes no claim about validation; notes list that as a gap.
+  ...
+  [supervisor] -> writer  (proposed finish; OVERRIDDEN: finish proposed with a draft that predates the latest research)
+      why: Looks complete.
+```
+
+### What the Supervisor reads, and what it returns
+
+| Reads (`render_supervisor_view`) | Returns (`SupervisorDecision`) |
+| --- | --- |
+| question, sub-questions | `rationale`: written *first*, so the route is conditioned on it |
+| research notes (excerpted) and `research_outcome` | `next`: `researcher` / `writer` / `finish` |
+| draft, marked STALE if it predates the latest notes | `researcher_brief`: what a follow-up pass should find |
+| dispatches used / cap per agent | |
+| its own earlier decisions this turn | |
+
+The reply uses `with_structured_output(..., method="json_schema")`, the
+Anthropic API's native structured output. The default `function_calling`
+method forces a tool call, which the API rejects when thinking is on.
+
+### Code guards have the last word
+
+| Guard | Proposal | Routed to |
+| --- | --- | --- |
+| agent's dispatch cap reached | that agent | `fixed_policy`'s choice |
+| no research yet | `writer` | `researcher` |
+| no draft, or a stale one | `finish` | `writer` (if budget remains) |
+| model output raises or fails validation | — | `fixed_policy` (6.1's hand-off) |
+
+Every route except `finish` spends a capped dispatch, so a turn makes at most
+`sum(caps) + 1` decisions whatever the model says.
+`tests/test_supervisor.py::test_no_supervisor_can_loop_forever` checks this
+against Supervisors that always research, always write, always finish, or
+ping-pong.
+
+### The Researcher's 6.2 contract
+
+- **`researcher_brief`** (the Supervisor writes it, the Researcher reads it):
+  what this pass should look for. It is reset on every research dispatch, so an
+  old brief never steers a new pass.
+- **`research_outcome`** (the Researcher writes it): `findings` /
+  `nothing_found` / `budget_exhausted` for the *latest* pass. The guards branch
+  on this, not on text inside the notes.
+- **Merge-on-rerun**: a follow-up pass appends under a code-written header, and
+  never rewrites. Knowledge-base excerpts keep their `[n]` numbers. A pass that
+  finds nothing leaves the notes unchanged.
+
 ## Where each Phase 6 concept lives
 
 | Concept | File |
@@ -917,3 +989,14 @@ search result.
 | Telling the Writer "nothing was found" explicitly | `agents/writer.py` → `NO_NOTES` |
 | Which stream modes see inside a subgraph | `cli.py` → `cmd_multi_agent` |
 | Per-invocation vs. per-revision agent budgets (for 6.3) | `multi_agent_graph.py` (bottom note) |
+| Why routing is a model's judgement now | `agents/supervisor.py` (module docstring) |
+| Structured output, `json_schema` vs `function_calling` | `agents/supervisor.py` (module docstring), `make_supervisor` |
+| Rationale-before-route field order | `agents/supervisor.py` → `SupervisorDecision` |
+| What the Supervisor sees | `agents/supervisor.py` → `render_supervisor_view` |
+| Code guards overruling the model; the termination bound | `agents/supervisor.py` → `apply_guards`; `tests/test_supervisor.py` |
+| Falling back to the known-good hand-off | `agents/supervisor.py` → `fixed_policy` |
+| Stale draft, answered from the decision log | `agents/supervisor.py` → `draft_is_current` |
+| Decision in a node, edge in a routing function (vs `Command`) | `multi_agent_graph.py` → `route_from_supervisor` |
+| Hub-and-spoke vs agents routing each other | `multi_agent_graph.py` (6.2 docstring) |
+| Why the decision log does not use `operator.add` | `multi_agent_state.py` → `supervisor_log` |
+| Briefs and merge-on-rerun | `agents/researcher.py` (6.2 docstring), `compile_notes`, `retrieve` |

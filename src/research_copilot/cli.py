@@ -43,6 +43,13 @@ Phase 6 (step 6.1) adds one command, and here a new command *is* right:
 It is a new command, not a flag on `graph-agent`, because it is a different
 graph with a different State, not more edges inside the old one. Phase 5's
 graph stays reachable, unchanged, through `graph-agent`.
+
+6.2 adds flags to `multi-agent`, not a command. The Supervisor changes who
+decides the route, not what the graph is:
+  --routing supervisor|fixed          a model decides (default), or 6.1's
+                                      hand-off as a fixed policy
+  --max-researcher-runs / --max-writer-runs
+                                      per-turn dispatch caps
 """
 
 import argparse
@@ -799,12 +806,31 @@ def _describe_update(node: str, update: dict) -> str:
     return ", ".join(parts)
 
 
+def _describe_supervisor(update: dict) -> str:
+    """The latest Supervisor decision as one line: route, override, rationale."""
+    log = update.get("supervisor_log") or []
+    if not log:
+        return _describe_update("supervisor", update)
+    e = log[-1]
+    line = f"-> {e['routed_to']}"
+    if e["override"]:
+        proposed = e["proposed"] or "nothing usable"
+        line += f"  (proposed {proposed}; OVERRIDDEN: {e['override']})"
+    if e.get("brief"):
+        line += f"  brief={e['brief']!r}"
+    rationale = " ".join(e["rationale"].split())
+    return line + f"\n      why: {rationale[:160]}" + ("..." if len(rationale) > 160 else "")
+
+
 def cmd_multi_agent(
     question: str,
     mode: str,
     *,
     max_research_iterations: int,
     plan: bool = False,
+    routing: str = "supervisor",
+    max_researcher_runs: int = 2,
+    max_writer_runs: int = 2,
 ) -> None:
     """One question through Researcher -> Writer, with every hand-off printed.
 
@@ -841,6 +867,13 @@ def cmd_multi_agent(
     graph = build_multi_agent_graph(
         max_research_iterations=max_research_iterations,
         enable_planning=plan,
+        routing=routing,
+        dispatch_caps={"researcher": max_researcher_runs, "writer": max_writer_runs},
+    )
+    print(
+        f"[routing] {routing}"
+        f"  (caps: researcher {max_researcher_runs}, writer {max_writer_runs})",
+        file=sys.stderr,
     )
 
     state: dict = {}
@@ -866,7 +899,10 @@ def cmd_multi_agent(
             )
         elif stream_mode == "updates" and not namespace:
             for node, update in payload.items():
-                print(f"  [{node}] {_describe_update(node, update or {})}", file=sys.stderr)
+                if node == "supervisor":
+                    print(f"  [supervisor] {_describe_supervisor(update or {})}", file=sys.stderr)
+                else:
+                    print(f"  [{node}] {_describe_update(node, update or {})}", file=sys.stderr)
     print("--- end hand-offs ---", file=sys.stderr)
 
     print(final_answer(state))
@@ -890,6 +926,8 @@ def _print_multi_agent_state(state: dict) -> None:
         file=sys.stderr,
     )
     print(f"                    research_iterations: {state.get('research_iterations', 0)}", file=sys.stderr)
+    if state.get("research_outcome"):
+        print(f"                    research_outcome: {state['research_outcome']}", file=sys.stderr)
     documents = state.get("documents") or []
     if documents:
         print(f"                    documents: {len(documents)} retrieved", file=sys.stderr)
@@ -897,6 +935,19 @@ def _print_multi_agent_state(state: dict) -> None:
             print(f"      [{i}] {describe_source(document)}", file=sys.stderr)
     draft = " ".join((state.get("draft") or "").split())
     print(f"  writer         -> draft: {draft[:70]!r}" + ("..." if len(draft) > 70 else ""), file=sys.stderr)
+    log = state.get("supervisor_log") or []
+    if log:
+        dispatches = state.get("dispatches") or {}
+        print(
+            "  supervisor     -> dispatches: "
+            + (", ".join(f"{k} {v}" for k, v in dispatches.items()) or "none"),
+            file=sys.stderr,
+        )
+        overridden = sum(1 for e in log if e["override"])
+        print(f"                    decisions: {len(log)} ({overridden} overridden)", file=sys.stderr)
+        for e in log:
+            flag = f"  [override: {e['override']}]" if e["override"] else ""
+            print(f"      {e['step']}. -> {e['routed_to']}{flag}", file=sys.stderr)
     messages = state.get("messages", [])
     print(f"  finalize_answer-> messages: {len(messages)}", file=sys.stderr)
     for message in messages:
@@ -1224,6 +1275,27 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Decompose the question first (Phase 5's planner, unchanged)",
     )
+    multi_parser.add_argument(
+        "--routing",
+        choices=["supervisor", "fixed"],
+        default="supervisor",
+        help=(
+            "supervisor: a model decides who acts next (6.2). fixed: 6.1's "
+            "research -> write -> finish, as a policy on the same graph."
+        ),
+    )
+    multi_parser.add_argument(
+        "--max-researcher-runs",
+        type=int,
+        default=2,
+        help="How many times the Supervisor may dispatch the Researcher per turn",
+    )
+    multi_parser.add_argument(
+        "--max-writer-runs",
+        type=int,
+        default=2,
+        help="How many times the Supervisor may dispatch the Writer per turn",
+    )
 
     args = parser.parse_args(argv)
     _report_tracing()
@@ -1301,6 +1373,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.mode,
                 max_research_iterations=args.max_research_iterations,
                 plan=args.plan,
+                routing=args.routing,
+                max_researcher_runs=args.max_researcher_runs,
+                max_writer_runs=args.max_writer_runs,
             )
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)

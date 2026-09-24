@@ -1,4 +1,4 @@
-"""Phase 6: the multi-agent graph. Step 6.1 - a fixed hand-off, no Supervisor yet.
+"""Phase 6: the multi-agent graph. Steps 6.1 (agents) and 6.2 (Supervisor).
 
 Read `graph.py` beside this file. That graph is left exactly as Phase 5 built
 it, so the two shapes can be compared directly:
@@ -40,6 +40,34 @@ separates two questions that would otherwise be tangled:
 If 6.2 misbehaves, a known-good 6.1 means the fault is in the routing, not in
 the agents underneath it.
 
+--------------------------------------------------------------------------
+6.2: the hub
+--------------------------------------------------------------------------
+The straight line above is gone from the wiring. Every agent now returns to a
+Supervisor node, and a routing function sends the run wherever the Supervisor
+decided:
+
+    START ─→ plan_question ─→ supervisor ──route_from_supervisor──┬─ "researcher" ─→ [researcher] ─┐
+                                  ↑                               ├─ "writer" ─────→ writer ───────┤
+                                  └───────────────────────────────┼────────────────────────────────┘
+                                                                  └─ "finish" ─────→ finalize_answer ─→ END
+
+The 6.1 hand-off still exists as a *policy* instead of as edges.
+`routing="fixed"` runs this same graph with `fixed_policy` (agents/supervisor.py)
+in the Supervisor's seat, and it takes exactly 6.1's path. So the change from
+6.1 to 6.2 is "who decides", not "what the graph is", the same move Phase 5
+made when it put a model in the reviewer's seat.
+
+CONCEPT: hub-and-spoke vs. agents routing to each other
+The alternative to a hub is letting each agent pick its successor: the
+Researcher decides "now the Writer", the Writer decides "back to research".
+It avoids an extra model call per hop, and it spreads the routing logic across
+every agent. Then no single place knows the dispatch counts, the budget, or the
+history of decisions, and the question "why did the run go there?" has as many
+answers as there are agents. The hub costs one model call per hop and buys one
+place where routing is decided, capped, logged, and overridable. For a system
+whose routing is the thing under test, that is the right trade.
+
 CONCEPT: what is deliberately missing, compared with Phase 5
 Several Phase 4-5 features are not wired in yet. Each is left out for a stated
 reason, not forgotten:
@@ -56,6 +84,7 @@ reason, not forgotten:
 """
 
 from collections.abc import Sequence
+from typing import Literal
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
@@ -69,6 +98,10 @@ from langgraph.graph import END, START, StateGraph
 from research_copilot.agents.researcher import (
     DEFAULT_MAX_RESEARCH_ITERATIONS,
     build_researcher,
+)
+from research_copilot.agents.supervisor import (
+    DEFAULT_DISPATCH_CAPS,
+    make_supervisor,
 )
 from research_copilot.agents.writer import make_writer
 # Reused verbatim from Phase 5: the planner's prompt and its fail-towards-less
@@ -87,6 +120,9 @@ def build_multi_agent_graph(
     researcher_model: BaseChatModel | None = None,
     writer_model: BaseChatModel | None = None,
     planner_model: BaseChatModel | None = None,
+    supervisor_model: BaseChatModel | None = None,
+    routing: Literal["supervisor", "fixed"] = "supervisor",
+    dispatch_caps: dict[str, int] | None = None,
     tools: Sequence[BaseTool] | None = None,
     retriever: BaseRetriever | None = None,
     max_research_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
@@ -113,6 +149,11 @@ def build_multi_agent_graph(
         max_iterations=max_research_iterations,
     )
     write_draft = make_writer(model=writer_model or model)
+    supervisor = make_supervisor(
+        model=supervisor_model or model,
+        caps=dispatch_caps or DEFAULT_DISPATCH_CAPS,
+        routing=routing,
+    )
 
     # ------------------------------------------------------------------- nodes
 
@@ -163,6 +204,36 @@ def build_multi_agent_graph(
         draft = state.get("draft", "").strip()
         return {"messages": [AIMessage(content=draft or "(the Writer produced no answer)")]}
 
+    def route_from_supervisor(state: MultiAgentState) -> str:
+        """Read the Supervisor's decision and name the next node.
+
+        CONCEPT: why the decision and the edge are two steps
+        The Supervisor node makes the decision (a model call, plus guards) and
+        writes it to `next_agent`. This function only reads it back. It could
+        have been one step: LangGraph lets a node return
+        `Command(goto="writer")` and route itself. Two steps are used here for
+        three reasons:
+          - a routing function must not have side effects (graph.py, Phase 3),
+            and a model call is a side effect with a price. The decision has to
+            be made in a node.
+          - `next_agent` in state means the decision is in every checkpoint and
+            in every state dump, next to the log entry that explains it.
+          - the `path_map` below declares every possible destination up front,
+            so the hub is drawn completely before anything runs. A node that
+            returns `Command(goto=...)` needs a separate `destinations=` hint to
+            get the same drawing.
+
+        Unknown values raise, the same rule as `route_by_mode`. The Supervisor
+        only ever writes a guarded route, so reaching the raise means a bug in
+        the Supervisor, not a bad model reply.
+        """
+        route = state.get("next_agent", "")
+        if route in ("researcher", "writer"):
+            return route
+        if route == "finish":
+            return "finalize_answer"
+        raise ValueError(f"supervisor left an unknown next_agent {route!r}")
+
     # ------------------------------------------------------------------ wiring
 
     builder = StateGraph(MultiAgentState)
@@ -182,14 +253,27 @@ def build_multi_agent_graph(
     builder.add_node("researcher", researcher)
     builder.add_node("writer", owns("writer")(write_draft))
     builder.add_node("finalize_answer", owns("finalize_answer")(finalize_answer))
+    builder.add_node("supervisor", owns("supervisor")(supervisor))
 
-    # The fixed hand-off. In 6.2 the two middle edges are replaced by edges
-    # into and out of a Supervisor. `plan_question` and `finalize_answer` stay
-    # where they are.
+    # 6.2: the hub. 6.1's fixed edges researcher -> writer -> finalize_answer
+    # are gone. Every agent returns to the Supervisor, and the Supervisor's
+    # decision picks the next edge.
     builder.add_edge(START, "plan_question")
-    builder.add_edge("plan_question", "researcher")
-    builder.add_edge("researcher", "writer")
-    builder.add_edge("writer", "finalize_answer")
+    builder.add_edge("plan_question", "supervisor")
+    builder.add_conditional_edges(
+        "supervisor",
+        route_from_supervisor,
+        {
+            "researcher": "researcher",
+            "writer": "writer",
+            "finalize_answer": "finalize_answer",
+        },
+    )
+    # The spokes. These are the cycles, and they are safe for the same reason
+    # every earlier cycle was: the routing function that enters them can also
+    # leave them, and here the dispatch caps guarantee it eventually must.
+    builder.add_edge("researcher", "supervisor")
+    builder.add_edge("writer", "supervisor")
     builder.add_edge("finalize_answer", END)
 
     return builder.compile(checkpointer=checkpointer, name="research-copilot-multi-agent")
@@ -220,6 +304,17 @@ def multi_agent_turn_input(question: str, mode: Mode = "live-search") -> dict:
         "documents": [],
         "research_iterations": 0,
         "draft": "",
+        # --- 6.2 ---
+        # All Supervisor-owned, and all per turn. `dispatches` especially: a
+        # per-turn budget that is never reset is a budget that only ever runs
+        # out (state.py, Phase 5). `supervisor_log` can be reset like this only
+        # because it does not use an accumulating reducer - see its
+        # declaration.
+        "research_outcome": "",
+        "researcher_brief": "",
+        "next_agent": "",
+        "dispatches": {},
+        "supervisor_log": [],
     }
 
 
@@ -240,7 +335,7 @@ def make_graph(config: dict | None = None) -> Runnable:
     """Factory for the LangGraph dev server / Studio (see langgraph.json).
 
     Compiles without an API key or an embedding model, because every agent
-    builds its model and retriever on first use. So Studio can draw the graph,
+    (the Supervisor included) builds its model and retriever on first use. So Studio can draw the graph,
     Researcher subgraph included, before anything has been configured.
     """
     return build_multi_agent_graph()
@@ -255,11 +350,14 @@ def make_graph(config: dict | None = None) -> Runnable:
 # counts from 0 inside it. The parent-level copy is only a *report* of what the
 # last research pass spent.
 #
-# That stops being enough in 6.2. Once the Supervisor can send work back to the
-# Researcher, the Researcher runs more than once per turn, and each run starts
-# counting from zero. So the budget is per *invocation*, and nothing caps the
-# number of invocations. A Supervisor that keeps saying "research more" gets a
-# full fresh tool budget every time. In 6.3, the per-agent budget structure has
-# to decide whether a budget is per invocation (what the subgraph gives for free
-# today) or per revision (what Phase 5's `iterations` was). That choice, not the
-# container type, is the real decision there.
+# That stopped being enough in 6.2. Once the Supervisor can send work back to
+# the Researcher, the Researcher runs more than once per turn, and each run
+# starts counting from zero. So the tool budget is per *invocation*.
+#
+# 6.2 caps the number of invocations instead: `dispatches` (Supervisor-owned)
+# against DEFAULT_DISPATCH_CAPS. The total research spend in a turn is now
+# bounded by dispatch cap x research-iteration cap. That is two numbers in two
+# places, and neither is visible from the other, which is the smell 6.3's
+# per-agent budget structure exists to fix. It also has to decide whether a
+# budget resets per revision (Phase 5's `iterations`) or per turn (6.2's
+# `dispatches`). That choice, not the container type, is the real decision.

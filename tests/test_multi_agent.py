@@ -90,6 +90,11 @@ def stub_retriever(by_query, log=None):
 
 
 def graph(*, researcher=None, writer=None, **kwargs):
+    """The agents under 6.1's hand-off. `routing="fixed"` runs the 6.2 hub
+    with the fixed policy in the Supervisor's seat, which takes exactly 6.1's
+    path. These tests are about the agents, not the routing (that is
+    test_supervisor.py)."""
+    kwargs.setdefault("routing", "fixed")
     return build_multi_agent_graph(
         researcher_model=researcher,
         writer_model=writer,
@@ -335,6 +340,7 @@ def test_private_channel_is_hidden_from_state_not_from_disk():
         writer_model=scripted("answer"),
         tools=[search_arxiv],
         checkpointer=saver,
+        routing="fixed",
     )
     config = {"configurable": {"thread_id": "t"}}
     run_multi_agent("Q", graph=g, config=config)
@@ -424,7 +430,10 @@ def test_stream_shows_the_researchers_inner_steps_under_its_namespace():
 
     outer = [node for ns, update in events if not ns for node in update]
     inner = [node for ns, update in events if ns for node in update]
-    assert outer == ["plan_question", "researcher", "writer", "finalize_answer"]
+    assert outer == [
+        "plan_question", "supervisor", "researcher", "supervisor", "writer",
+        "supervisor", "finalize_answer",
+    ]
     assert inner == ["research_model", "research_tools", "research_model", "compile_notes"]
     assert all(ns[0].startswith("researcher:") for ns, _ in events if ns)
 
@@ -473,7 +482,7 @@ def test_cli_multi_agent_prints_answer_and_hand_offs(monkeypatch, capsys):
         monkeypatch.setattr(f"research_copilot.{module}.get_chat_model", lambda **kw: shared)
     monkeypatch.setattr("research_copilot.agents.researcher.search_arxiv", search_arxiv)
 
-    assert cli.main(["multi-agent", "Does RAG work?"]) == 0
+    assert cli.main(["multi-agent", "Does RAG work?", "--routing", "fixed"]) == 0
     out, err = capsys.readouterr()
 
     assert "Final: RAG works." in out

@@ -84,6 +84,46 @@ contract with the rest of the graph, and `ResearcherOutput` in
 multi_agent_state.py is where it is declared.
 
 --------------------------------------------------------------------------
+CONCEPT (6.2): running more than once per turn - briefs and merge-on-rerun
+--------------------------------------------------------------------------
+In 6.1 the Researcher ran exactly once per turn. With a Supervisor it can be
+sent back ("the notes cover the method but not its benchmarks"). Two things
+have to be true for a second pass to be worth having.
+
+  It must know what to look for. The Supervisor writes `researcher_brief`, and
+  the Researcher reads it as the focus of this pass. Without a brief, a second
+  pass sees exactly the inputs the first pass saw, and a model given the same
+  inputs mostly runs the same searches.
+
+  It must not lose the first pass. `research_notes` has one owner, but one
+  owner writing twice can still overwrite itself. So the Researcher reads its
+  own previous notes (they are in ResearcherInput) and hands back the *merged*
+  notes. The merge is done in code, not by the model:
+
+      live-search      previous notes, then a "Follow-up research" header
+                       naming the brief, then this pass's notes. The model is
+                       shown the previous notes so it does not repeat those
+                       searches, but it is asked to write *only the new
+                       findings*. The earlier ones are not the model's to
+                       keep or drop.
+      knowledge-base   previous documents plus this pass's new ones,
+                       deduplicated and renumbered from one list. Earlier
+                       excerpts keep their [n] numbers, because new ones are
+                       appended after them.
+
+  Why not let the model merge? Because "rewrite these notes to include the new
+  findings" is an instruction a model can follow imperfectly, and the way it
+  fails is silent: a source from pass one quietly goes missing in pass two, and
+  the Writer can no longer cite it. Appending cannot lose anything. The cost is
+  notes that read less smoothly, and the notes' reader is the Writer, which
+  does not mind.
+
+`research_outcome` describes the *latest pass*, not the notes as a whole. A
+second pass that finds nothing new reports "nothing_found" and leaves the
+notes exactly as the first pass left them. That is the fact the Supervisor
+needs: going back again, with that brief, did not help.
+
+--------------------------------------------------------------------------
 CONCEPT: why the Writer is *not* shaped like this
 --------------------------------------------------------------------------
 See the top of agents/writer.py. In short: the Writer makes one model call
@@ -144,6 +184,29 @@ RESEARCHER_SYSTEM_PROMPT = (
     "the reader."
 )
 
+# 6.2: shown on a pass that has a brief, or that follows an earlier pass. On a
+# follow-up, the instruction is to write only the *new* findings, because the
+# merge is done by code (see "merge-on-rerun" above).
+BRIEF_INSTRUCTION = (
+    "The coordinator has asked you to focus this research pass on:\n{brief}"
+)
+FOLLOW_UP_INSTRUCTION = (
+    "This is a follow-up research pass. These notes were already gathered and "
+    "will be kept as they are:\n\n{previous}\n\n"
+    "Do not repeat searches for what they already cover. Reply with notes on "
+    "the *new* findings only, in the same form. If you find nothing new, reply "
+    "with exactly: NOTHING NEW"
+)
+
+# The header code puts between passes when merging. Written by code, not by a
+# model, so it is always there and always says why the pass happened.
+FOLLOW_UP_HEADER = "--- Follow-up research ({reason}) ---"
+
+# What a follow-up pass that found nothing is asked to say. It is matched
+# exactly, after trimming and ignoring case. Anything else counts as findings,
+# which fails towards keeping text rather than discarding it.
+NOTHING_NEW = "NOTHING NEW"
+
 
 class ResearcherState(ResearcherInput, ResearcherOutput, total=False):
     """The Researcher's whole internal state: what it reads, what it writes,
@@ -194,6 +257,13 @@ def build_researcher(
 
     # ----------------------------------------------------------------- nodes
 
+    def _merge(previous: str, new: str, brief: str) -> str:
+        """Merge-on-rerun for text notes: append, never rewrite."""
+        if not previous:
+            return new
+        reason = f"brief: {brief}" if brief else "no brief given"
+        return f"{previous}\n\n{FOLLOW_UP_HEADER.format(reason=reason)}\n{new}"
+
     def retrieve(state: ResearcherState) -> dict:
         """Knowledge-base mode: Phase 5's `retrieve_docs`, now inside an agent.
 
@@ -206,35 +276,46 @@ def build_researcher(
         evidence is the excerpts themselves, and a model summarizing them
         before the Writer sees them would be a lossy copy of the text the
         Writer is supposed to cite. So the numbered excerpts *are* the notes.
+
+        6.2: the brief, when there is one, is one more query. The previous
+        pass's documents are the starting list, so a follow-up pass can only
+        *add* excerpts, and the excerpts already there keep their numbers.
         """
         active = retriever if retriever is not None else get_retriever()
+        brief = state.get("researcher_brief", "").strip()
         queries = [state.get("question", ""), *state.get("sub_questions", [])]
+        if brief:
+            queries.append(brief)
 
-        documents: list[Document] = []
-        seen: set[str] = set()
+        documents: list[Document] = list(state.get("documents") or [])
+        seen: set[str] = {d.page_content for d in documents}
+        found_new = False
         for query in queries:
             for document in active.invoke(query):
                 if document.page_content in seen:
                     continue
                 seen.add(document.page_content)
                 documents.append(document)
+                found_new = True
 
         return {
             "documents": documents,
             # Empty string, not format_docs' "(no excerpts retrieved)"
             # placeholder. "Produced nothing" should be the same value in both
-            # modes, so the Writer - and in 6.2 the Supervisor - can test for
-            # it without knowing which mode ran.
+            # modes, so the Writer and the Supervisor can test for it without
+            # knowing which mode ran.
             "research_notes": format_docs(documents) if documents else "",
             "research_iterations": 0,
+            "research_outcome": "findings" if found_new else "nothing_found",
         }
 
     def research_model(state: ResearcherState) -> dict:
         """One step of the Researcher's tool loop: search, or write up notes.
 
         The request is built from three layers, in this order:
-          1. the Researcher's own instructions (+ summary, + plan), rebuilt
-             every call and never stored
+          1. the Researcher's own instructions (+ summary, + plan, + brief,
+             + previous notes on a follow-up pass), rebuilt every call and
+             never stored
           2. the shared conversation so far, *read* from `messages`. This is
              how a follow-up question gets researched in context.
           3. the private tool loop, from `research_messages`
@@ -258,6 +339,18 @@ def build_researcher(
                         "The question was broken down into these sub-questions. "
                         "Gather evidence for each of them:\n" + listed
                     )
+                )
+            )
+        if state.get("researcher_brief", "").strip():
+            instructions.append(
+                SystemMessage(
+                    content=BRIEF_INSTRUCTION.format(brief=state["researcher_brief"].strip())
+                )
+            )
+        if state.get("research_notes", "").strip():
+            instructions.append(
+                SystemMessage(
+                    content=FOLLOW_UP_INSTRUCTION.format(previous=state["research_notes"].strip())
                 )
             )
 
@@ -285,7 +378,7 @@ def build_researcher(
         }
 
     def compile_notes(state: ResearcherState) -> dict:
-        """Turn the private loop's end state into the one field that leaves it.
+        """Turn the private loop's end state into the fields that leave it.
 
         CONCEPT: an agent must always hand something over.
         The normal case is that the model's last message is its written-up
@@ -297,32 +390,50 @@ def build_researcher(
         ran out of budget before summarizing.
 
         So the fallback keeps the evidence. The tool results that did come back
-        are passed on raw, under a header that says what happened. The Writer
-        gets worse notes rather than none, and the header puts the reason in
-        the state dump, so "the Writer answered badly" can be traced back to
-        "the Researcher ran out of budget".
+        are passed on raw, under a header that says what happened, and
+        `research_outcome` says it in a form code can branch on.
 
         No model call here. A summarizing call on the fallback path would be a
         research step taken *after* the research budget said stop.
+
+        6.2: every branch goes through `_merge`, so a follow-up pass appends to
+        the previous notes and never replaces them. A pass that produced nothing
+        returns the previous notes unchanged.
         """
+        previous = state.get("research_notes", "").strip()
+        brief = state.get("researcher_brief", "").strip()
         messages = state.get("research_messages", [])
+        # Only this invocation's messages are here: the private channel starts
+        # empty on every call. So "results" means this pass's results.
         last = messages[-1] if messages else None
 
         if isinstance(last, AIMessage) and not last.tool_calls and last.text.strip():
-            return {"research_notes": last.text.strip()}
+            new = last.text.strip()
+            if new.strip(" .").upper() == NOTHING_NEW:
+                return {"research_notes": previous, "research_outcome": "nothing_found"}
+            return {"research_notes": _merge(previous, new, brief), "research_outcome": "findings"}
 
         results = [
             m.text.strip() for m in messages if isinstance(m, ToolMessage) and m.text.strip()
         ]
-        if not results:
-            return {"research_notes": ""}
-        return {
-            "research_notes": (
+        if isinstance(last, AIMessage) and last.tool_calls:
+            # The cap tripped mid-search. That is budget exhaustion even if no
+            # result came back: the Supervisor should know the loop was cut
+            # off, not that the searching came up empty.
+            if not results:
+                return {"research_notes": previous, "research_outcome": "budget_exhausted"}
+            raw = (
                 "(The Researcher's search budget ran out before it wrote up its "
                 "findings. Raw search results follow, unfiltered.)\n\n"
                 + "\n\n".join(results)
             )
-        }
+            return {
+                "research_notes": _merge(previous, raw, brief),
+                "research_outcome": "budget_exhausted",
+            }
+
+        # The model ended with an empty reply and no tool call.
+        return {"research_notes": previous, "research_outcome": "nothing_found"}
 
     # --------------------------------------------------------------- routing
 

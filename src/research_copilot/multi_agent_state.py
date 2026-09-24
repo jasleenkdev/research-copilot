@@ -86,13 +86,51 @@ should not have.
 
 from collections.abc import Callable
 from functools import wraps
-from typing import Annotated, TypedDict
+from typing import Annotated, Literal, TypedDict
 
 from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
 from research_copilot.state import Mode
+
+# 6.2. How the Researcher's *latest pass* went, as a value code can branch on.
+#   findings          this pass produced new evidence, and the notes include it
+#   nothing_found     this pass found nothing new. Any notes from an earlier
+#                     pass are still there, unchanged.
+#   budget_exhausted  the tool loop hit its cap while still searching. Whatever
+#                     came back was handed over raw.
+# The empty string means the Researcher has not run this turn.
+#
+# Before 6.2 this distinction existed only as a header inside the notes text.
+# That is fine for the Writer, a model that reads prose. It is not fine for the
+# Supervisor's *guards*, which are code: "was the budget the problem?" should
+# not be answered by searching a string for "budget ran out".
+ResearchOutcome = Literal["findings", "nothing_found", "budget_exhausted"]
+
+# 6.2. The places the Supervisor can send the run. "finish" is not an agent. It
+# routes to `finalize_answer`, which commits the draft. The Critic joins this
+# Literal in 6.3, and not before: a Supervisor offered an agent that does not
+# exist yet will sometimes pick it.
+Route = Literal["researcher", "writer", "finish"]
+
+
+class SupervisorLogEntry(TypedDict):
+    """One Supervisor decision, kept for debugging.
+
+    `proposed` and `routed_to` are separate on purpose. `proposed` is what the
+    model asked for, and `routed_to` is where the run actually went after the
+    code guards had their say. When the two differ, `override` says why. When
+    the model's output could not be used at all, `proposed` is None and
+    `rationale` records the error.
+    """
+
+    step: int
+    proposed: str | None
+    rationale: str
+    routed_to: str
+    override: str
+    brief: str
 
 
 class MultiAgentState(TypedDict, total=False):
@@ -149,12 +187,56 @@ class MultiAgentState(TypedDict, total=False):
     # it. See the note on budgets at the bottom of multi_agent_graph.py.
     research_iterations: int
 
+    # 6.2: how the latest research pass went. See ResearchOutcome above.
+    research_outcome: ResearchOutcome | Literal[""]
+
     # --- the Writer's output (owner: writer) ------------------------------------
     # The answer as written, before it is committed to `messages`. Same reason
     # as Phase 4's `draft`: a proposed answer is a thing the transcript cannot
     # hold. What changed is that the key now has exactly one author, *by rule*
     # rather than by accident.
     draft: str
+
+    # --- the Supervisor's decisions (owner: supervisor) -------------------------
+    # CONCEPT (6.2): the Supervisor owns the *routing* fields, and no content.
+    # It never writes notes or drafts. It decides who acts next, and records
+    # enough to let you check that decision afterwards.
+
+    # Where the routing function sends the run next. The Supervisor's decision
+    # is stored in state, and a plain routing function reads it. The model is
+    # not asked to name a node directly. See `route_from_supervisor` in
+    # multi_agent_graph.py for why the decision and the edge are two steps.
+    next_agent: Route | Literal[""]
+
+    # What the Supervisor wants the Researcher to look for on this dispatch.
+    # Empty means "research the question as asked". It is how a second research
+    # pass differs from the first: without a brief, a re-dispatched Researcher
+    # is shown the same inputs and runs the same searches again. The Supervisor
+    # writes it and the Researcher reads it, which is ownership working as
+    # intended. One agent's output is another agent's input, through a field
+    # with a single author.
+    researcher_brief: str
+
+    # How many times each agent has been dispatched this turn, e.g.
+    # {"researcher": 2, "writer": 1}. The Supervisor owns the count because
+    # dispatching is the Supervisor's action: an agent cannot count how often
+    # it is *called*. The Researcher in particular starts its private state
+    # from scratch on every call (see agents/researcher.py). These counts are
+    # checked against per-agent caps by the Supervisor's guards, and they are
+    # what bounds the hub. 6.3 turns this into the per-agent budget structure.
+    dispatches: dict[str, int]
+
+    # Every decision this turn, oldest first. See SupervisorLogEntry.
+    #
+    # Deliberately *not* `Annotated[list, operator.add]`, although it is an
+    # append-only log. An accumulating reducer cannot be reset: the turn
+    # boundary writing `[]` would mean "append nothing", and the log would
+    # carry every earlier turn's decisions forever. The Supervisor is the only
+    # writer, so it can do the append itself (read the list, return it one
+    # longer) under the default overwrite reducer. Then the turn boundary's
+    # `[]` really does reset it. Single ownership is what makes that safe: with
+    # two writers, read-then-overwrite would lose entries.
+    supervisor_log: list[SupervisorLogEntry]
 
 
 class ResearcherInput(TypedDict, total=False):
@@ -170,6 +252,14 @@ class ResearcherInput(TypedDict, total=False):
     `messages` is readable so that a follow-up ("and what came after it?") can
     be researched in context. It is deliberately *not* in `ResearcherOutput`,
     so the Researcher can read the transcript and can never write to it.
+
+    6.2 adds three reads:
+      researcher_brief  the Supervisor's instruction for this pass
+      research_notes,   the Researcher's *own* previous output. It reads these
+      documents         so it can merge into them rather than replace them
+                        (the merge-on-rerun rule, in agents/researcher.py).
+                        Reading your own field back is still single ownership:
+                        the owner is the only writer, not the only reader.
     """
 
     messages: Annotated[list[BaseMessage], add_messages]
@@ -177,6 +267,10 @@ class ResearcherInput(TypedDict, total=False):
     mode: Mode
     summary: str
     sub_questions: list[str]
+    # --- 6.2 ---
+    researcher_brief: str
+    research_notes: str
+    documents: list[Document]
 
 
 class ResearcherOutput(TypedDict, total=False):
@@ -192,6 +286,7 @@ class ResearcherOutput(TypedDict, total=False):
     research_notes: str
     documents: list[Document]
     research_iterations: int
+    research_outcome: ResearchOutcome | Literal[""]
 
 
 # --------------------------------------------------------------------------
@@ -210,6 +305,11 @@ OWNERS: dict[str, frozenset[str]] = {
     "researcher": frozenset(ResearcherOutput.__annotations__),
     "writer": frozenset({"draft"}),
     "finalize_answer": frozenset({"messages"}),
+    # 6.2. Routing fields only. The Supervisor can read everything and write
+    # nothing that an agent produces.
+    "supervisor": frozenset(
+        {"next_agent", "researcher_brief", "dispatches", "supervisor_log"}
+    ),
 }
 
 
