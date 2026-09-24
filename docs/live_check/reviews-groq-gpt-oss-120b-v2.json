@@ -1,0 +1,25 @@
+{
+  "_meta": {
+    "run": "groq openai/gpt-oss-120b, v2: Supervisor prompt WITH the premise-checking instruction (commit 416d465)",
+    "reviewer": "Claude (read in session)",
+    "results": "data/live_check/results-groq-v2.jsonl",
+    "summary": "wrong_premise 2 -> 0 vs day one; scope_creep 1 -> 2, and now changes a route (SUPC10). Single sample per scenario: 4 routes flipped vs day one in both directions, so run-to-run variance is not separable from the prompt change."
+  },
+  "SUP01": {"category": "sound", "note": ""},
+  "SUP02": {"category": "sound", "note": "True premise; same research-it preference as day one (lenient route)."},
+  "SUP03": {"category": "sound", "note": ""},
+  "SUP04": {"category": "sound", "note": "Premise now handled: brief says 'if no such paper exists, note that'. Day one: wrong_premise."},
+  "SUP05": {"category": "sound", "note": ""},
+  "SUP06": {"category": "sound", "note": "Now routes on the critique (writer). Day one: ignores_critique."},
+  "SUP07": {"category": "sound", "note": ""},
+  "SUP08": {"category": "ignores_critique", "note": "Premise now CHECKED ('the critique's evidence problem is unfounded') - day one: wrong_premise. Then routes on the open reliability gap, and misses that the draft itself dropped the citation."},
+  "SUP09": {"category": "sound", "note": "Brief again invents a date range (2020-2024)."},
+  "SUP10": {"category": "sound", "note": "Writes, noting the gap. Label disputed either way."},
+  "SUP11": {"category": "sound", "note": ""},
+  "SUP12": {"category": "sound", "note": ""},
+  "SUP13": {"category": "sound", "note": "Cites the spent budget and the nothing_found pass again."},
+  "SUPC02": {"category": "sound", "note": "Consistent research-it preference for an unresearched real paper."},
+  "SUPC06": {"category": "sound", "note": ""},
+  "SUPC08": {"category": "scope_creep", "note": "Checks the premise correctly, then invents a requirement (cover EM/F1/BLEU/human eval) and routes to research on it."},
+  "SUPC10": {"category": "scope_creep", "note": "Notes answer the question as asked; routes to research to make the answer 'comprehensive' (retrieval/generation metrics). Day one: writer."}
+}
