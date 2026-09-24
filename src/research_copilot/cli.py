@@ -89,7 +89,10 @@ table; the two are meant to match.
 """
 
 import argparse
+import json
+import os
 import sys
+from pathlib import Path
 
 from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -1278,6 +1281,85 @@ def _print_multi_agent_state(state: dict) -> None:
     print("--- end state ---", file=sys.stderr)
 
 
+# --- Phase 7: live verification ------------------------------------------------
+
+
+def cmd_live_check(
+    action: str,
+    *,
+    only: str | None = None,
+    items: str | None = None,
+    daily_token_budget: int | None = 90_000,
+    tpm: int = 12_000,
+    results: str | None = None,
+) -> None:
+    """Run (or report on) the live-verification scenarios. (Phase 7, A)
+
+    `list` needs nothing. `run` needs a key for the selected provider, and
+    spends real tokens: on Groq's free tier, tokens count against daily limits;
+    on Anthropic, they cost money. `report` reads the results file only.
+    """
+    from research_copilot.live_check import report as live_report
+    from research_copilot.live_check import runner
+    from research_copilot.live_check.scenarios import SCENARIOS
+
+    settings = get_settings()
+    if settings.tracing_enabled and not settings.langsmith_api_key_set:
+        # Every model call would try to upload a trace and log a 401. Tracing
+        # without a key records nothing, so turn it off for this run.
+        os.environ["LANGSMITH_TRACING"] = "false"
+    provider = settings.provider
+    model = settings.groq_model if provider == "groq" else settings.model
+    path = runner.DEFAULT_RESULTS_DIR / f"results-{provider}.jsonl"
+    if results:
+        path = Path(results)
+
+    selected = SCENARIOS
+    if only:
+        wanted = {x.strip() for x in only.split(",")}
+        selected = [s for s in SCENARIOS if s.id in wanted]
+    if items:
+        wanted_items = {x.strip() for x in items.split(",")}
+        selected = [s for s in selected if s.item in wanted_items]
+
+    if action == "list":
+        for s in selected:
+            print(f"{s.id:<7} item {s.item:<3} {s.kind:<17} ~{s.est_tokens:>6} tok  {s.title}")
+        print(f"\n{len(selected)} scenarios, ~{sum(s.est_tokens for s in selected)} tokens estimated")
+        return
+
+    limits_path = path.with_suffix(".limits.json")
+    if action == "report":
+        limits = json.loads(limits_path.read_text()) if limits_path.exists() else None
+        text = live_report.render(runner.load_results(path), limits=limits)
+        out = path.with_suffix(".md")
+        out.write_text(text)
+        print(text)
+        print(f"[saved] {out}", file=sys.stderr)
+        return
+
+    # Fail before anything is recorded: a missing key would otherwise turn
+    # every scenario into an "error" record.
+    from research_copilot.config import require_anthropic_key, require_groq_key
+
+    (require_groq_key if provider == "groq" else require_anthropic_key)()
+    print(f"[live-check] provider={provider} model={model} results={path}", file=sys.stderr)
+    if provider == "groq" and not limits_path.exists():
+        try:
+            limits = runner.read_groq_limits()
+            limits_path.parent.mkdir(parents=True, exist_ok=True)
+            limits_path.write_text(json.dumps(limits, indent=2))
+            print(f"[limits] {limits}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 - the run can proceed on defaults
+            print(f"[limits] could not read rate-limit headers: {exc}", file=sys.stderr)
+    cfg = runner.RunConfig(
+        provider=provider, model=model, results_path=path,
+        tpm_limit=tpm, daily_token_budget=daily_token_budget,
+    )
+    runner.run(cfg, selected, log=lambda m: print(m, file=sys.stderr))
+    print(f"\nNext: research-copilot live-check report", file=sys.stderr)
+
+
 def _report_tracing() -> None:
     settings = get_settings()
     if settings.tracing_enabled and not settings.langsmith_api_key_set:
@@ -1383,7 +1465,17 @@ def _add_phase5_flags(parser: argparse.ArgumentParser) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="research-copilot", description="Research Copilot (Phases 1-6)"
+        prog="research-copilot", description="Research Copilot (Phases 1-7)"
+    )
+    # Phase 7: provider for every model this invocation builds. It goes before
+    # the command (`research-copilot --provider groq multi-agent ...`) because
+    # it applies to all of them. It sets RESEARCH_COPILOT_PROVIDER for this
+    # process only, which get_chat_model() reads on every call.
+    parser.add_argument(
+        "--provider",
+        choices=["anthropic", "groq"],
+        default=None,
+        help="Model provider for this run (default: RESEARCH_COPILOT_PROVIDER, else anthropic)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1560,6 +1652,21 @@ def main(argv: list[str] | None = None) -> int:
         "which", nargs="?", choices=["graph", "prebuilt", "multi"], default="graph"
     )
 
+    # --- Phase 7 ---
+    live_parser = subparsers.add_parser(
+        "live-check",
+        help="Live verification of README's real-key list against a real provider (Phase 7)",
+    )
+    live_parser.add_argument("action", choices=["list", "run", "report"])
+    live_parser.add_argument("--only", default=None, help="Comma-separated scenario ids")
+    live_parser.add_argument("--items", default=None, help="Comma-separated README item numbers")
+    live_parser.add_argument(
+        "--daily-token-budget", type=int, default=90_000,
+        help="Stop before a scenario that would exceed this many tokens today (0 = no cap)",
+    )
+    live_parser.add_argument("--tpm", type=int, default=12_000, help="Tokens-per-minute pacing limit")
+    live_parser.add_argument("--results", default=None, help="Results JSONL path")
+
     # --- Phase 6 ---
     multi_review_parser = subparsers.add_parser(
         "multi-review",
@@ -1651,6 +1758,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    if args.provider:
+        os.environ["RESEARCH_COPILOT_PROVIDER"] = args.provider
     _report_tracing()
 
     try:
@@ -1736,6 +1845,15 @@ def main(argv: list[str] | None = None) -> int:
                 approve=args.approve,
                 memory_strategy=args.memory_strategy,
                 max_history_tokens=args.max_history_tokens,
+            )
+        elif args.command == "live-check":
+            cmd_live_check(
+                args.action,
+                only=args.only,
+                items=args.items,
+                daily_token_budget=args.daily_token_budget or None,
+                tpm=args.tpm,
+                results=args.results,
             )
         elif args.command == "multi-review":
             decision = None

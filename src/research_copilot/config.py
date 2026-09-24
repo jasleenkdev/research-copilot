@@ -46,6 +46,9 @@ class Settings:
     enable_critic: bool
     max_revisions: int
     enable_planning: bool
+    # Phase 7: which provider get_chat_model() builds
+    provider: str
+    groq_model: str
 
 
 def get_settings() -> Settings:
@@ -104,7 +107,25 @@ def get_settings() -> Settings:
         enable_planning=(
             os.getenv("RESEARCH_COPILOT_PLAN", "").lower() == "true"
         ),
+        # Phase 7. "anthropic" (the default, and the provider the project was
+        # built against) or "groq". Read on every get_chat_model() call, so
+        # the CLI's --provider flag can set it for one invocation.
+        provider=(os.getenv("RESEARCH_COPILOT_PROVIDER") or "anthropic").lower(),
+        # Groq's own model id. Separate from RESEARCH_COPILOT_MODEL because the
+        # two providers' ids never overlap, and switching provider should not
+        # mean editing the Anthropic setting.
+        groq_model=os.getenv("RESEARCH_COPILOT_GROQ_MODEL") or "llama-3.3-70b-versatile",
     )
+
+
+PROVIDERS = ("anthropic", "groq")
+
+
+def require_groq_key() -> None:
+    if not os.getenv("GROQ_API_KEY"):
+        raise RuntimeError(
+            "GROQ_API_KEY is not set. Add it to .env (free key: https://console.groq.com/keys)."
+        )
 
 
 def require_anthropic_key() -> None:

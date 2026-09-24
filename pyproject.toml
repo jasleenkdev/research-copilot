@@ -32,6 +32,9 @@ dev = ["pytest>=9"]
 # Kept optional because it pulls in a web server and is only needed for
 # visualization, not for the CLI or the tests.
 studio = ["langgraph-cli[inmem]>=0.1.55"]
+# Phase 7: a second provider, for the live-verification pass on a free tier.
+# Optional: the Anthropic path never imports it.
+groq = ["langchain-groq>=1.1"]
 
 [project.scripts]
 research-copilot = "research_copilot.cli:main"

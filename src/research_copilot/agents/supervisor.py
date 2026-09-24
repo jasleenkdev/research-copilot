@@ -173,7 +173,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from research_copilot.models import get_chat_model
+from research_copilot.models import get_chat_model, structured_output_method
 from research_copilot.multi_agent_state import (
     AGENTS,
     MultiAgentState,
@@ -626,8 +626,12 @@ def make_supervisor(
     def structured():
         if "runnable" not in _cache:
             base = model or get_chat_model()
+            # Phase 7: the method is the provider's to decide, not the
+            # Supervisor's - json_schema on Anthropic, function_calling on
+            # Groq's Llama. See models.structured_output_method.
+            _cache["method"] = structured_output_method(base)
             _cache["runnable"] = base.with_structured_output(
-                SupervisorDecision, method="json_schema"
+                SupervisorDecision, method=_cache["method"]
             )
         return _cache["runnable"]
 
