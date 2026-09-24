@@ -178,34 +178,40 @@ def test_every_call_is_told_its_remaining_budget():
     assert "4 of 4" in first and "3 of 4" in second
 
 
-def test_the_last_call_is_reserved_tools_off_notes_demanded():
+def test_the_last_call_is_reserved_no_tools_results_as_text():
     model = BindRecordingModel(
         search_call("a", "1"), search_call("b", "2"),
         "- Findings: from the two searches\n- Sources: s\n- Gaps: none",
     )
     out = build_researcher(model=model, tools=[search], max_iterations=3).invoke(researcher_input())
-    assert model.bound_with == [None, None, "none"]
-    assert "This is your last call" in "\n".join(m.text for m in model.requests[-1])
+    # Two calls through the tool-bound model; the third through the bare model.
+    assert model.bound_with == [None, None]
+    final_request = model.requests[-1]
+    # No tool-call history in the final request - only plain-text results.
+    assert not any(getattr(m, "tool_calls", None) for m in final_request)
+    assert not any(m.type == "tool" for m in final_request)
+    assert "you have no tools now" in final_request[-1].text
+    assert "Paper about a" in final_request[-1].text and "Paper about b" in final_request[-1].text
     # The point of the fix: the cap ends in written notes, not raw results.
     assert out["research_outcome"] == "findings"
     assert out["research_notes"].startswith("- Findings: from the two searches")
 
 
-def test_a_model_that_ignores_tool_choice_still_gets_the_raw_fallback():
-    model = BindRecordingModel(search_call("a", "1"), search_call("b", "2"))
+def test_a_final_call_that_still_errors_gets_the_final_hint_then_raw_results():
+    from research_copilot.agents.researcher import FINAL_RETRY_NOTE
+
+    err = RuntimeError("Error code: 400 - Tool choice is none, but model called a tool - tool_use_failed")
+    model = BindRecordingModel(search_call("a", "1"), err, err)
     out = build_researcher(model=model, tools=[search], max_iterations=2).invoke(researcher_input())
-    assert out["research_outcome"] == "budget_exhausted"
+    assert any(m.content == FINAL_RETRY_NOTE for m in model.requests[-1] if m.type == "system")
+    assert out["research_outcome"] == "model_error"
     assert "Paper about a" in out["research_notes"]
 
 
-def test_no_tool_choice_is_provider_specific():
-    from langchain_anthropic import ChatAnthropic
-    from langchain_groq import ChatGroq
-
-    from research_copilot.models import no_tool_choice
-
-    # langchain-anthropic would turn the string "none" into a forced tool named "none".
-    assert no_tool_choice(ChatAnthropic(model="claude-opus-5", api_key="x")) == {"type": "none"}
-    assert no_tool_choice(ChatGroq(model="openai/gpt-oss-120b", api_key="x")) == "none"
-    bound = ChatAnthropic(model="claude-opus-5", api_key="x").bind_tools([search], tool_choice={"type": "none"})
-    assert bound.kwargs["tool_choice"] == {"type": "none"}
+def test_a_model_that_answers_the_final_call_with_a_tool_call_is_not_run():
+    """A bare model cannot really call a tool; a fake can. The reply's tool call
+    is ignored (nothing routes to research_tools past the cap) and the budget
+    fallback hands over the raw results."""
+    model = BindRecordingModel(search_call("a", "1"), search_call("b", "2"))
+    out = build_researcher(model=model, tools=[search], max_iterations=2).invoke(researcher_input())
+    assert out["research_outcome"] == "budget_exhausted"

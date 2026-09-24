@@ -188,21 +188,3 @@ def structured_output_method(model) -> str:
         return "json_schema" if model.model_name in _GROQ_JSON_SCHEMA_MODELS else "function_calling"
     return "json_schema"
 
-
-def no_tool_choice(model):
-    """The `tool_choice` value meaning "tools are defined, but do not call one".
-
-    Used when a node must keep its tools *bound* - its history already contains
-    tool calls, and the Anthropic API rejects tool_use blocks in a request
-    that defines no tools - but must not let the model call another one (the
-    Researcher's reserved final call, Phase 7).
-
-    Provider-specific, and found the hard way: langchain-anthropic 1.7 maps
-    the string "none" to `{"type": "tool", "name": "none"}` - *forcing* a tool
-    named "none", which does not exist, and which the API would reject anyway
-    with thinking on. The Anthropic API's own form, `{"type": "none"}`, is
-    passed through unchanged. OpenAI-style providers (Groq) take the string.
-    """
-    if isinstance(model, ChatAnthropic):
-        return {"type": "none"}
-    return "none"

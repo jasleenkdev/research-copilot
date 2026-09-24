@@ -136,7 +136,7 @@ from typing import Annotated, TypedDict
 
 from langchain_core.documents import Document
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
@@ -145,7 +145,7 @@ from langgraph.graph.message import add_messages
 
 from research_copilot.agent_loop import _execute_tool_call
 from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
-from research_copilot.models import get_chat_model, no_tool_choice
+from research_copilot.models import get_chat_model
 from research_copilot.multi_agent_state import ResearcherInput, ResearcherOutput, budget_of
 from research_copilot.retrieval import format_docs, get_retriever
 from research_copilot.tools import search_arxiv
@@ -206,12 +206,19 @@ BUDGET_LINE = (
     "can write the notes."
 )
 
-# The reserved final call: tools switched off, notes demanded.
-FINAL_CALL_INSTRUCTION = (
-    "This is your last call in this round. Do not search. Write your research "
-    "notes now, in the required form, from the results you already have - or, "
-    "on a follow-up pass with nothing new, reply NOTHING NEW."
+# The reserved final call: no tools at all, the search results as plain text,
+# notes demanded.
+FINAL_RESULTS_TURN = (
+    "Your searches this round returned the following. This is your last call: "
+    "you have no tools now. Write your research notes from these results, in "
+    "the required form - or, on a follow-up pass with nothing new, reply "
+    "NOTHING NEW.\n\n{results}"
 )
+FINAL_RETRY_NOTE = (
+    "You cannot call any tool on this call. Reply with your research notes as "
+    "plain text."
+)
+
 
 # Phase 7: the hint for the one retry after a call to a tool that does not exist.
 INVALID_TOOL_NOTE = (
@@ -287,15 +294,28 @@ def build_researcher(
     _bound: dict[str, Runnable] = {}
 
     def researcher_model(*, final: bool = False) -> Runnable:
-        """The model with tools bound - or, for the reserved final call, bound
-        with tool_choice "none": the history holds tool calls, so the tools
-        must stay defined, but no new call is allowed."""
+        """The model with tools bound - or, for the reserved final call, the
+        bare model with NO tools.
+
+        CONCEPT: why the final call removes the tools rather than forbidding them
+        The first version kept the tools bound with `tool_choice="none"`. Two
+        things broke it:
+          - Groq's gpt-oss-120b called `search_arxiv` anyway, twice (live, A1
+            day two). The provider rejected it (`Tool choice is none, but
+            model called a tool`), and the pass ended on raw results.
+          - langchain-anthropic 1.7 maps the string "none" to
+            `{"type": "tool", "name": "none"}` - forcing a tool *named*
+            "none". The Anthropic path would have failed too, differently.
+        A model with no tools bound has nothing to call. The catch is that
+        Anthropic rejects tool_use blocks in a request that defines no tools,
+        so the final request cannot carry the tool-call history. It carries
+        the results as plain text instead (`_final_request`). A guarantee made
+        by what the request contains, not by what the model is asked to do.
+        """
         key = "final" if final else "model"
         if key not in _bound:
             base = model or get_chat_model()
-            _bound[key] = (
-                base.bind_tools(tools, tool_choice=no_tool_choice(base)) if final else base.bind_tools(tools)
-            )
+            _bound[key] = base if final else base.bind_tools(tools)
         return _bound[key]
 
     # ----------------------------------------------------------------- nodes
@@ -424,20 +444,33 @@ def build_researcher(
         left = max_iterations - spent(state)
         final = left <= 1
         instructions.append(SystemMessage(content=BUDGET_LINE.format(left=left, cap=max_iterations)))
-        if final:
-            instructions.append(SystemMessage(content=FINAL_CALL_INSTRUCTION))
 
-        request = [
-            *instructions,
-            *state.get("messages", []),
-            *state.get("research_messages", []),
-        ]
-        # Phase 7: a call to a nonexistent tool is retried once with a hint
-        # (resilience.py). A failed attempt still spent tokens, so every
-        # attempt counts against the round budget.
+        if final:
+            # The reserved last call (see researcher_model): no tools, and the
+            # private tool loop flattened into one plain-text turn.
+            results = "\n\n".join(
+                m.text.strip()
+                for m in state.get("research_messages", [])
+                if isinstance(m, ToolMessage) and m.text.strip()
+            ) or "(no searches ran this round)"
+            request = [
+                *instructions,
+                *state.get("messages", []),
+                HumanMessage(content=FINAL_RESULTS_TURN.format(results=results)),
+            ]
+        else:
+            request = [
+                *instructions,
+                *state.get("messages", []),
+                *state.get("research_messages", []),
+            ]
+        # Phase 7: a call to a tool it may not use is retried once with a hint
+        # (resilience.py) - the hint that fits the call. A failed attempt still
+        # spent tokens, so every attempt counts against the round budget.
         result, attempts = invoke_with_recovery(
             researcher_model(final=final), request,
-            recoverable=is_invalid_tool_call, note=INVALID_TOOL_NOTE, where="researcher",
+            recoverable=is_invalid_tool_call,
+            note=FINAL_RETRY_NOTE if final else INVALID_TOOL_NOTE, where="researcher",
         )
         iterations = state.get("research_iterations", 0) + attempts
         if isinstance(result, ModelCallFailure):
