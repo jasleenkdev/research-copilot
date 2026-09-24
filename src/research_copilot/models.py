@@ -54,11 +54,12 @@ _SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # exercised by a Groq run at all. See the live-check report's item 1.
 
 # Groq's own max completion default. Anthropic gets 16000 (Phase 1). Groq's
-# free tier limits tokens *per minute* (see live_check/README notes), so a
-# smaller cap keeps a single runaway reply from eating a minute's budget.
-# Every agent's replies (notes, drafts, verdicts, routing decisions) fit
-# comfortably in 2048.
-_GROQ_DEFAULT_MAX_TOKENS = 2048
+# free tier limits tokens *per minute* (8K for gpt-oss-120b), so a smaller cap
+# keeps one runaway reply from eating a minute's budget. 4096 rather than
+# 2048 because gpt-oss is a reasoning model: its hidden reasoning counts as
+# completion tokens, and a cap that the reasoning alone can exhaust truncates
+# the answer (or the JSON) that follows it.
+_GROQ_DEFAULT_MAX_TOKENS = 4096
 
 # Groq models that support `response_format: json_schema` (constrained or
 # best-effort), per console.groq.com/docs/structured-outputs as of Sept 2026.
@@ -127,18 +128,43 @@ def get_chat_model(
     )
 
 
+def structured_output_kwargs(model) -> dict:
+    """The `with_structured_output(...)` keyword arguments for this model.
+
+    Groq's json_schema models get `strict=True`: without it Groq's json_schema
+    is "best effort" (asked for, not enforced), and the point of choosing
+    json_schema is enforcement - the same class of guarantee Anthropic's
+    `output_config.format` gives. Verified live on gpt-oss-120b in Phase 7 A1
+    (SupervisorDecision parses in both modes).
+    """
+    method = structured_output_method(model)
+    try:
+        from langchain_groq import ChatGroq
+    except ImportError:  # pragma: no cover
+        ChatGroq = None
+    if method == "json_schema" and ChatGroq is not None and isinstance(model, ChatGroq):
+        return {"method": method, "strict": True}
+    return {"method": method}
+
+
 def structured_output_method(model) -> str:
     """Which `with_structured_output(method=...)` to use for this model.
 
     CONCEPT: the same schema, enforced three different ways
       json_schema       the provider constrains generation to the schema.
                         Anthropic (`output_config.format`), and Groq's
-                        gpt-oss / Qwen models. Invalid output cannot be
-                        produced, and fields come out in schema order, which
-                        is what the Supervisor's rationale-first field order
-                        relies on (agents/supervisor.py).
+                        gpt-oss / Qwen models (with strict=True). Invalid
+                        output cannot be produced.
+                        NOT guaranteed: field order. The Supervisor puts
+                        `rationale` before `next` so the route is written
+                        after the reasoning (agents/supervisor.py). Phase 7
+                        A1 found gpt-oss-120b emits `next` first even under
+                        strict json_schema - a schema's key order is not a
+                        generation order. Whether Anthropic honours it is
+                        still to be checked with a real key.
       function_calling  the schema is offered as a tool and the model is made
-                        to call it. Groq's Llama 3.3 70B. Output is parsed and
+                        to call it. Groq's Llama models (not on the free
+                        tier; kept for paid keys). Output is parsed and
                         *validated* afterwards, not constrained, so an
                         invalid `next` is possible: it fails validation and
                         takes the Supervisor's fixed_policy fallback, logged.

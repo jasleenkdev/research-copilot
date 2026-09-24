@@ -33,8 +33,8 @@ def test_groq_provider_builds_chatgroq_with_the_configured_model(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
     model = get_chat_model()
     assert isinstance(model, ChatGroq)
-    assert model.model_name == "llama-3.3-70b-versatile"
-    assert model.max_tokens == 2048
+    assert model.model_name == "openai/gpt-oss-120b"
+    assert model.max_tokens == 4096
     assert get_chat_model(max_tokens=512).max_tokens == 512
 
 
@@ -59,6 +59,17 @@ def test_default_provider_is_still_anthropic(monkeypatch):
     assert isinstance(get_chat_model(), ChatAnthropic)
 
 
+def test_groq_json_schema_models_get_strict_mode():
+    from langchain_anthropic import ChatAnthropic
+    from langchain_groq import ChatGroq
+
+    from research_copilot.models import structured_output_kwargs
+
+    assert structured_output_kwargs(ChatGroq(model="openai/gpt-oss-120b", api_key="x")) == {"method": "json_schema", "strict": True}
+    assert structured_output_kwargs(ChatGroq(model="llama-3.3-70b-versatile", api_key="x")) == {"method": "function_calling"}
+    assert structured_output_kwargs(ChatAnthropic(model="claude-opus-5", api_key="x")) == {"method": "json_schema"}
+
+
 def test_structured_output_method_per_provider(monkeypatch):
     from langchain_anthropic import ChatAnthropic
     from langchain_groq import ChatGroq
@@ -79,7 +90,7 @@ def test_supervisor_asks_the_model_module_which_method_to_use(monkeypatch):
             asked.append(method)
             return RunnableLambda(lambda _: SupervisorDecision(rationale="r", next="researcher"))
 
-    monkeypatch.setattr("research_copilot.agents.supervisor.structured_output_method", lambda m: "function_calling")
+    monkeypatch.setattr("research_copilot.agents.supervisor.structured_output_kwargs", lambda m: {"method": "function_calling"})
     make_supervisor(model=Model())({"question": "Q", "dispatches": {}, "supervisor_log": []})
     assert asked == ["function_calling"]
 
@@ -116,6 +127,8 @@ def test_draft_edits_in_scenarios_actually_changed_the_text():
         assert by_id()[sid].inputs["draft"] != sc.GOOD_DRAFT, sid
     assert by_id()["SUP01"].inputs["state"]["draft"] != sc.GOOD_DRAFT
     assert by_id()["SUP08"].inputs["state"]["draft"] != sc.GOOD_DRAFT
+    assert sc.CLEAN_NOTES != sc.NOTES and "Gaps: none." in sc.CLEAN_NOTES
+    assert by_id()["SUPC08"].inputs["state"]["draft"] != sc.CLEAN_DRAFT
 
 
 def test_supervisor_scenarios_render_without_error():
@@ -321,3 +334,39 @@ def test_live_check_run_refuses_to_start_without_a_key(monkeypatch, capsys, tmp_
     assert code == 1 and "GROQ_API_KEY" in err
     assert not (tmp_path / "r.jsonl").exists()
     monkeypatch.delenv("RESEARCH_COPILOT_PROVIDER", raising=False)
+
+
+@pytest.mark.parametrize("text", [
+    "I\u2019m sorry, but I wasn\u2019t able to locate any usable evidence on this.",
+    "I could not find supporting evidence for this.",
+    "No evidence was found in the research notes.",
+])
+def test_admits_gap_recognises_real_phrasings(text):
+    assert runner.admits_gap(text)
+
+
+def test_admits_gap_is_not_fooled_by_a_confident_answer():
+    assert not runner.admits_gap("RAGAS measures faithfulness and relevance [2309.15217].")
+
+
+def test_writer_must_cite_something_when_notes_have_sources(tmp_path):
+    cfg, _, _ = cfg_with(tmp_path, replies=["RAG is evaluated with various metrics."])
+    r = runner.run(cfg, [by_id()["WRT01"]], log=quiet)["WRT01"]
+    assert r["checks"]["cites_something"] is False
+
+
+def test_rescore_updates_recorded_writer_results_without_a_model(tmp_path):
+    cfg, _, _ = cfg_with(tmp_path, replies=["I wasn\u2019t able to locate any usable evidence."])
+    path = cfg.results_path
+    runner.run(cfg, [by_id()["WRT02"]], log=quiet)
+    # Simulate a record scored by an older, stricter check.
+    old = runner.load_results(path)["WRT02"]
+    old["checks"]["admits_gap"] = False
+    old["status"] = "fail"
+    with path.open("a") as f:
+        f.write(json.dumps(old) + "\n")
+
+    assert runner.rescore(path, log=quiet) == ["WRT02"]
+    latest = runner.load_results(path)["WRT02"]
+    assert latest["status"] == "pass" and latest["rescored"] is True
+    assert latest["previous_checks"]["admits_gap"] is False

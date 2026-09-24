@@ -48,11 +48,22 @@ DEFAULT_RESULTS_DIR = PROJECT_ROOT / "data" / "live_check"
 
 _ARXIV_ID = re.compile(r"\b(\d{4}\.\d{4,5})(?:v\d+)?\b")
 _BRACKET_REF = re.compile(r"\[(\d+)\]")
+# Phrases a draft uses to admit the evidence is missing. Fixed after the first
+# Groq run: "I wasn’t able to locate any usable evidence" was a correct
+# admission that this missed (curly apostrophe; "locate"). Apostrophes are
+# normalised before matching, and the pattern keys on the *evidence* noun
+# rather than on the exact verb.
 _GAP_WORDS = re.compile(
-    r"\b(no (supporting )?evidence|not find|couldn'?t find|could not find|no (relevant )?"
-    r"(sources|information|research)|unable to find|nothing (was )?found)\b",
+    r"\b(no (usable |supporting |relevant )?(evidence|sources|information|research)"
+    r"|(not|n't|unable to|wasn't able to|was not able to|could not|couldn't)\s+"
+    r"(find|locate|identify)"
+    r"|nothing (was )?found|no .{0,20}evidence)\b",
     re.IGNORECASE,
 )
+
+
+def admits_gap(text: str) -> bool:
+    return bool(_GAP_WORDS.search((text or "").replace("\u2019", "'")))
 
 
 def arxiv_ids(text: str) -> set[str]:
@@ -64,8 +75,8 @@ class RunConfig:
     provider: str
     model: str
     results_path: Path
-    tpm_limit: int = 12_000           # Groq free tier, llama-3.3-70b (third-party figure; see report)
-    daily_token_budget: int | None = 90_000   # headroom under a 100K tokens/day limit
+    tpm_limit: int = 8_000            # Groq free tier, gpt-oss-120b (read from response headers)
+    daily_token_budget: int | None = 190_000  # headroom under gpt-oss-120b's 200K tokens/day
     model_factory: Callable = None    # () -> chat model; default get_chat_model
     search_tool: object = None        # default: the real search_arxiv
     verify_tool: object = None        # default: the real verify_citation
@@ -146,11 +157,12 @@ def _run_probe_structured(s: Scenario, cfg):
 
 def _run_structured_smoke(s: Scenario, cfg):
     from research_copilot.agents.supervisor import SupervisorDecision
-    from research_copilot.models import structured_output_method
+    from research_copilot.models import structured_output_kwargs
 
     model = _model(cfg)
-    method = structured_output_method(model)
-    runnable = model.with_structured_output(SupervisorDecision, method=method, include_raw=True)
+    kwargs = structured_output_kwargs(model)
+    method = kwargs["method"]
+    runnable = model.with_structured_output(SupervisorDecision, include_raw=True, **kwargs)
     out = runnable.invoke(
         [
             SystemMessage(content="Decide who acts next on a research team."),
@@ -163,9 +175,14 @@ def _run_structured_smoke(s: Scenario, cfg):
     order = []
     for call in getattr(raw, "tool_calls", None) or []:
         order = list(call.get("args", {}).keys())
+    if not order and isinstance(getattr(raw, "content", None), str):
+        try:
+            order = list(json.loads(raw.content).keys())  # json.loads keeps key order
+        except ValueError:
+            pass
     parsed = out.get("parsed")
     return (
-        {"method": method, "parsed": parsed.model_dump() if parsed else None,
+        {"method": method, "strict": kwargs.get("strict"), "parsed": parsed.model_dump() if parsed else None,
          "parsing_error": str(out.get("parsing_error") or ""), "field_order": order},
         {"parses": parsed is not None, "route_valid": bool(parsed) and parsed.next in ("researcher", "writer", "critic", "finish")},
         False,
@@ -275,17 +292,54 @@ def _run_writer(s: Scenario, cfg):
              "messages": [HumanMessage(content=s.inputs["question"])],
              **{k: v for k, v in s.inputs.items() if k not in ("question", "mode")}}
     draft = write(state)["draft"]
+    return {"draft": draft, "cited_ids": sorted(arxiv_ids(draft))}, writer_checks(s, draft), False
+
+
+def writer_checks(s: Scenario, draft: str) -> dict:
+    """Pure function of the draft, so a changed check can re-score a recorded
+    draft without another model call (see `rescore`)."""
     cited = arxiv_ids(draft)
-    checks = {"non_empty": bool(draft.strip()),
-              "cites_only_notes": cited <= set(s.expect.get("allowed_ids", []))}
+    allowed = set(s.expect.get("allowed_ids", []))
+    checks = {"non_empty": bool(draft.strip()), "cites_only_notes": cited <= allowed}
+    if allowed:
+        # Tightened after the first run: "cites only the notes" is trivially
+        # true for a draft that cites nothing.
+        checks["cites_something"] = bool(cited)
     if s.expect.get("forbidden_ids"):
         checks["dropped_flagged_citation"] = not (cited & set(s.expect["forbidden_ids"]))
     if s.expect.get("admits_gap"):
-        checks["admits_gap"] = bool(_GAP_WORDS.search(draft))
+        checks["admits_gap"] = admits_gap(draft)
     if "max_ref" in s.expect:
         refs = {int(n) for n in _BRACKET_REF.findall(draft)}
         checks["refs_in_range"] = bool(refs) and max(refs) <= s.expect["max_ref"]
-    return {"draft": draft, "cited_ids": sorted(cited)}, checks, False
+    return checks
+
+
+def rescore(path: Path, *, log: Callable[[str], None] = print) -> list[str]:
+    """Recompute checks for recorded Writer results after a check changes.
+
+    Writer checks depend only on the recorded draft, so no model is called.
+    The corrected record is appended with `rescored: true` and the previous
+    checks kept beside it, so the change is visible in the results file.
+    """
+    from research_copilot.live_check.scenarios import by_id
+
+    changed = []
+    for sid, record in load_results(path).items():
+        if record.get("kind") != "writer" or record.get("status") == "error":
+            continue
+        new = writer_checks(by_id()[sid], record["observed"]["draft"])
+        if new == record["checks"]:
+            continue
+        updated = {**record, "checks": new, "previous_checks": record["checks"], "rescored": True,
+                   "status": "pass" if all(new.values()) else "fail",
+                   # The tokens were spent by the original call; re-scoring
+                   # spends none, but the total must still count them once.
+                   "at": datetime.now(timezone.utc).isoformat()}
+        _append(path, updated)
+        changed.append(sid)
+        log(f"[rescored] {sid}: {record['status']} -> {updated['status']} (no model call)")
+    return changed
 
 
 def _run_e2e(s: Scenario, cfg):

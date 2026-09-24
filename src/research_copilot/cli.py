@@ -1289,8 +1289,8 @@ def cmd_live_check(
     *,
     only: str | None = None,
     items: str | None = None,
-    daily_token_budget: int | None = 90_000,
-    tpm: int = 12_000,
+    daily_token_budget: int | None = 190_000,
+    tpm: int = 8_000,
     results: str | None = None,
 ) -> None:
     """Run (or report on) the live-verification scenarios. (Phase 7, A)
@@ -1661,10 +1661,10 @@ def main(argv: list[str] | None = None) -> int:
     live_parser.add_argument("--only", default=None, help="Comma-separated scenario ids")
     live_parser.add_argument("--items", default=None, help="Comma-separated README item numbers")
     live_parser.add_argument(
-        "--daily-token-budget", type=int, default=90_000,
+        "--daily-token-budget", type=int, default=190_000,
         help="Stop before a scenario that would exceed this many tokens today (0 = no cap)",
     )
-    live_parser.add_argument("--tpm", type=int, default=12_000, help="Tokens-per-minute pacing limit")
+    live_parser.add_argument("--tpm", type=int, default=8_000, help="Tokens-per-minute pacing limit")
     live_parser.add_argument("--results", default=None, help="Results JSONL path")
 
     # --- Phase 6 ---

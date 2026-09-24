@@ -83,6 +83,20 @@ GOOD_DRAFT = (
     "well RAGAS agrees with human judgement."
 )
 
+# Controls for item 2 (added after the first Groq run, see SUPC*): a question
+# with no reliability half, and notes with no open gap, so a route to the
+# Researcher cannot be explained by "part of the question is genuinely
+# unanswered".
+CONTROL_QUESTION = "How are RAG pipelines evaluated?"
+CLEAN_NOTES = NOTES.replace(
+    "- Gaps: no evidence found on how well RAGAS agrees with human judgement.", "- Gaps: none."
+)
+CLEAN_DRAFT = (
+    "RAG pipelines are commonly evaluated with RAGAS "
+    "[http://arxiv.org/abs/2309.15217], which scores faithfulness, answer "
+    "relevance and context precision without needing reference answers."
+)
+
 KB_NOTES = (
     "[1] (notes/eval.md)\nRetrieval quality is measured with recall@k against a "
     "labelled set of relevant chunks.\n\n"
@@ -248,6 +262,38 @@ SCENARIOS: list[Scenario] = [
              note="The brief was tried and found nothing; writing the gap down is the "
                   "right move. A researcher proposal is the 'same brief after "
                   "nothing_found' failure (the dispatch-cap guard would also refuse it)."),
+
+    # --- 2 (controls): the same situations with no open gap -------------------
+    # Added after the first Groq run, where every wrong route cited the notes'
+    # open gap. Expectations written before these ran, like all the others -
+    # but designed in response to results, and labelled so.
+    Scenario("SUPC02", "2", "supervisor", "CONTROL of SUP02: Writer-added citation, no open gap",
+             {"state": _after_rejection(
+                 "The draft cites ARES (2311.09476). The paper exists on arXiv, but it is "
+                 "not in the research notes - the Writer added a source that was never "
+                 "researched.",
+                 draft=CLEAN_DRAFT + " ARES [2311.09476] is another option.",
+                 notes=CLEAN_NOTES, question=CONTROL_QUESTION,
+                 checks=[{"arxiv_id": "2309.15217", "status": "found"},
+                         {"arxiv_id": "2311.09476", "status": "found"}])},
+             _route("writer", "researcher"), note="control: added after the first run"),
+    Scenario("SUPC06", "2", "supervisor", "CONTROL of SUP06: pure style, no open gap",
+             {"state": _after_rejection(
+                 "Writing problem: the answer is three times longer than it needs to be and "
+                 "repeats the same point about faithfulness twice.",
+                 draft=CLEAN_DRAFT * 3, notes=CLEAN_NOTES, question=CONTROL_QUESTION)},
+             _route("writer"), note="control: added after the first run"),
+    Scenario("SUPC08", "2", "supervisor", "CONTROL of SUP08: critic wrong about a source, no open gap",
+             {"state": _after_rejection(
+                 "Evidence problem: nothing supports the claim that RAGAS is reference-free.",
+                 draft=CLEAN_DRAFT.replace(" [http://arxiv.org/abs/2309.15217]", ""),
+                 notes=CLEAN_NOTES, question=CONTROL_QUESTION)},
+             _route("writer", "researcher"), note="control: added after the first run"),
+    Scenario("SUPC10", "2", "supervisor", "CONTROL of SUP10: notes complete, no draft yet",
+             {"state": {"question": CONTROL_QUESTION, "mode": "live-search",
+                        "research_notes": CLEAN_NOTES, "research_outcome": "findings",
+                        "dispatches": {"researcher": 1}, "supervisor_log": _log("researcher")}},
+             _route("writer"), note="control: added after the first run"),
 
     # --- 4: Researcher (real arXiv search) ------------------------------------
     Scenario("RES01", "4", "researcher", "Notes format, sources copied verbatim",

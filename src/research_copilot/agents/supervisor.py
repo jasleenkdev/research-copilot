@@ -64,6 +64,17 @@ first and the rationale would be a justification written afterwards. That is
 exactly the "rationale doesn't match the decision" failure, built in by
 design.
 
+PHASE 7 A1 CORRECTION: the premise above - "fields are generated in schema
+order" - did not hold on the first real model tested. Groq's gpt-oss-120b,
+under strict json_schema, wrote `next` before `rationale`. A schema's key order
+constrains which keys appear, not the order they are generated in. For a
+reasoning model the route may still follow hidden reasoning, but the *visible*
+rationale is then written after the choice - exactly the justification-after-
+the-fact the ordering was meant to prevent. Whether Anthropic's
+`output_config.format` preserves order is unverified. The live-check harness
+records field order per call. The ordering stays as a hint that costs nothing,
+not as a guarantee.
+
 The rationale is also for you. It goes into `supervisor_log`, next to where the
 run actually went. It is the only record of *why* a route was taken, and
 reading it beside `routed_to` is how you debug the Supervisor.
@@ -173,7 +184,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from research_copilot.models import get_chat_model, structured_output_method
+from research_copilot.models import get_chat_model, structured_output_kwargs
 from research_copilot.multi_agent_state import (
     AGENTS,
     MultiAgentState,
@@ -629,9 +640,9 @@ def make_supervisor(
             # Phase 7: the method is the provider's to decide, not the
             # Supervisor's - json_schema on Anthropic, function_calling on
             # Groq's Llama. See models.structured_output_method.
-            _cache["method"] = structured_output_method(base)
+            _cache["kwargs"] = structured_output_kwargs(base)
             _cache["runnable"] = base.with_structured_output(
-                SupervisorDecision, method=_cache["method"]
+                SupervisorDecision, **_cache["kwargs"]
             )
         return _cache["runnable"]
 

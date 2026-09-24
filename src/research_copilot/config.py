@@ -114,7 +114,12 @@ def get_settings() -> Settings:
         # Groq's own model id. Separate from RESEARCH_COPILOT_MODEL because the
         # two providers' ids never overlap, and switching provider should not
         # mean editing the Anthropic setting.
-        groq_model=os.getenv("RESEARCH_COPILOT_GROQ_MODEL") or "llama-3.3-70b-versatile",
+        #
+        # openai/gpt-oss-120b, not Llama 3.3 70B: Llama is not offered on
+        # Groq's free tier (a free key gets 404 model_not_found for it, found
+        # on the first live call in Phase 7 A1). gpt-oss-120b is the most
+        # capable model a free key can use, and it supports strict json_schema.
+        groq_model=os.getenv("RESEARCH_COPILOT_GROQ_MODEL") or "openai/gpt-oss-120b",
     )
 
 
