@@ -145,7 +145,7 @@ from langgraph.graph.message import add_messages
 
 from research_copilot.agent_loop import _execute_tool_call
 from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
-from research_copilot.models import get_chat_model
+from research_copilot.models import get_chat_model, no_tool_choice
 from research_copilot.multi_agent_state import ResearcherInput, ResearcherOutput, budget_of
 from research_copilot.retrieval import format_docs, get_retriever
 from research_copilot.tools import search_arxiv
@@ -194,6 +194,23 @@ RESEARCHER_SYSTEM_PROMPT = (
     # not have. Harmless on any model, and true of this agent everywhere.
     "search_arxiv is your only tool. You cannot open URLs, files, or web "
     "pages - the search results are all you get, so write your notes from them."
+)
+
+# Phase 7 A1, day two: shown on every call. gpt-oss-120b never ended its own
+# search loop - five searches, then the cap, every time, even when the notes
+# it was given already held the answer. A cap the model cannot see is one it
+# cannot plan for.
+BUDGET_LINE = (
+    "Model calls left in this research round, including this one: {left} of {cap}. "
+    "Most questions need one to three searches. Stop searching as soon as you "
+    "can write the notes."
+)
+
+# The reserved final call: tools switched off, notes demanded.
+FINAL_CALL_INSTRUCTION = (
+    "This is your last call in this round. Do not search. Write your research "
+    "notes now, in the required form, from the results you already have - or, "
+    "on a follow-up pass with nothing new, reply NOTHING NEW."
 )
 
 # Phase 7: the hint for the one retry after a call to a tool that does not exist.
@@ -269,10 +286,17 @@ def build_researcher(
 
     _bound: dict[str, Runnable] = {}
 
-    def researcher_model() -> Runnable:
-        if "model" not in _bound:
-            _bound["model"] = (model or get_chat_model()).bind_tools(tools)
-        return _bound["model"]
+    def researcher_model(*, final: bool = False) -> Runnable:
+        """The model with tools bound - or, for the reserved final call, bound
+        with tool_choice "none": the history holds tool calls, so the tools
+        must stay defined, but no new call is allowed."""
+        key = "final" if final else "model"
+        if key not in _bound:
+            base = model or get_chat_model()
+            _bound[key] = (
+                base.bind_tools(tools, tool_choice=no_tool_choice(base)) if final else base.bind_tools(tools)
+            )
+        return _bound[key]
 
     # ----------------------------------------------------------------- nodes
 
@@ -388,6 +412,21 @@ def build_researcher(
                 )
             )
 
+        # Phase 7 A1 (day two): the two fixes for a model that never stops
+        # searching. Same discipline as should_revise and the Supervisor's
+        # guards - a limit the model is told about, and a code guard that
+        # holds whether or not it listens:
+        #   1. it is told its remaining budget, every call
+        #   2. the LAST call is reserved: tools switched off, notes demanded.
+        #      So a pass that reaches its cap ends in written notes, and the
+        #      raw-results fallback in compile_notes is left for real failures
+        #      (a model error, a model that ignores tool_choice).
+        left = max_iterations - spent(state)
+        final = left <= 1
+        instructions.append(SystemMessage(content=BUDGET_LINE.format(left=left, cap=max_iterations)))
+        if final:
+            instructions.append(SystemMessage(content=FINAL_CALL_INSTRUCTION))
+
         request = [
             *instructions,
             *state.get("messages", []),
@@ -397,7 +436,7 @@ def build_researcher(
         # (resilience.py). A failed attempt still spent tokens, so every
         # attempt counts against the round budget.
         result, attempts = invoke_with_recovery(
-            researcher_model(), request,
+            researcher_model(final=final), request,
             recoverable=is_invalid_tool_call, note=INVALID_TOOL_NOTE, where="researcher",
         )
         iterations = state.get("research_iterations", 0) + attempts
