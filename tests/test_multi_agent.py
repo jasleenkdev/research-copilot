@@ -431,7 +431,7 @@ def test_stream_shows_the_researchers_inner_steps_under_its_namespace():
     outer = [node for ns, update in events if not ns for node in update]
     inner = [node for ns, update in events if ns for node in update]
     assert outer == [
-        "plan_question", "supervisor", "researcher", "supervisor", "writer",
+        "begin_turn", "prune_history", "plan_question", "supervisor", "researcher", "supervisor", "writer",
         "supervisor", "finalize_answer",
     ]
     assert inner == ["research_model", "research_tools", "research_model", "compile_notes"]

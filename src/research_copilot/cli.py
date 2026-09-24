@@ -66,18 +66,26 @@ by phase:
                                                                 turn, from either reviewer. Also
                                                                 scales the Writer/Critic dispatch
                                                                 caps so every round can be used
-  --approve         human gate       unchanged; after the       graph-level only in 6.3, same
-                    before commit    critic when both on        meaning (after the Supervisor
-                                     (critic first)             finishes, after the Critic when
-                                                                both on). Not yet a flag on
-                                                                `multi-agent`: it needs --thread,
-                                                                --checkpointer and `review`, which
-                                                                arrive together in 6.4
+  --approve         human gate       unchanged; after the       same meaning: after the Supervisor
+                    before commit    critic when both on        finishes, after the Critic approves
+                                     (critic first)             when both on. Wired in 6.4 with
+                                                                --thread/--checkpointer; resumed by
+                                                                `multi-review`, which reads the
+                                                                policy from the thread instead of
+                                                                taking --critic/--max-revisions
+                                                                again (Phase 5's `review` did)
   --plan            (did not exist)  plan_question before the   unchanged: plan_question before
                                      mode branch                the Supervisor's first decision
 
 `graph-agent` keeps its Phase 5 meanings for all four. Nothing on that command
 changed.
+
+6.4 adds one command and the persistence flags:
+  multi-review    Phase 4's `review` for a paused multi-agent thread
+  multi-agent --thread / --checkpointer / --approve / --memory / --max-history-tokens
+                  Phase 4's flags, same meanings as on graph-agent
+The README's "Phase 6: Multi-agent (reference)" section carries the same flag
+table; the two are meant to match.
 """
 
 import argparse
@@ -109,9 +117,12 @@ from research_copilot.graph import (
     resume_graph,
     run_graph,
 )
+from langgraph.types import Command
+
 from research_copilot.multi_agent_graph import (
     build_multi_agent_graph,
     multi_agent_turn_input,
+    run_policy,
 )
 from research_copilot.prebuilt import build_prebuilt_agent, run_prebuilt_agent
 from research_copilot.retrieval import (
@@ -687,6 +698,16 @@ def cmd_review(
         )
 
         snapshot = graph.get_state(thread_config(thread_id))
+        # PHASE 6.4: both graphs share one checkpoint database. Resuming a
+        # multi-agent thread with this graph would replay its `review_draft`
+        # into a graph with different nodes and a different State - refuse.
+        if _is_multi_agent_thread(_raw_channels(saver, thread_id)):
+            print(
+                f"error: thread {thread_id!r} was written by the multi-agent graph. "
+                f"Use: research-copilot multi-review --thread {thread_id}",
+                file=sys.stderr,
+            )
+            return
         payload = pending_interrupt(graph, thread_id=thread_id)
 
         if payload is None:
@@ -863,6 +884,90 @@ def _describe_critic(update: dict) -> str:
     return line
 
 
+def _stream_multi_agent(graph, graph_input, config: dict | None) -> tuple[dict, dict | None]:
+    """Run (or resume) the multi-agent graph, printing every hand-off.
+
+    Returns (final state, pending interrupt payload or None). `graph_input` is
+    either a turn's input dict or a `Command(resume=...)` - `.stream()`, like
+    `.invoke()`, takes either in the same position.
+
+    CONCEPT: streaming with subgraphs=True
+    `.invoke()` returns only the final state, which for this graph hides the
+    very thing Phase 6 is about. So this streams instead. With
+    `subgraphs=True`, every event carries a *namespace*: `()` for a step of the
+    parent graph, and `("researcher:<task-id>",)` for a step *inside* an agent's
+    subgraph. The trace indents the inner steps.
+
+    CONCEPT: which stream modes can see inside a subgraph's private state
+    For a *nested* subgraph, the "updates" and "values" stream modes are
+    narrowed to the subgraph's output schema: a Researcher step that wrote only
+    `research_messages` shows up there as an empty update. The "tasks" mode
+    reports each task's full write, private keys included. So:
+
+        "updates"   parent-level steps: what each agent handed over
+        "tasks"     steps inside a subgraph, private channel included
+        "values"    the parent's state, the same dict `.invoke()` returns
+
+    The privacy boundary is therefore a boundary on *state other agents read*,
+    not on visibility: the private channels are kept out of the parent's state
+    and out of other agents' inputs, but they are streamed here and they are
+    checkpointed under their subgraph's namespace (6.1's finding).
+    """
+    state: dict = {}
+    print("--- hand-offs ---", file=sys.stderr)
+    for namespace, stream_mode, payload in graph.stream(
+        graph_input,
+        config,
+        stream_mode=["updates", "tasks", "values"],
+        subgraphs=True,
+    ):
+        if stream_mode == "values":
+            if not namespace:
+                state = payload
+        elif stream_mode == "tasks" and namespace and "result" in payload:
+            # A finished step inside an agent's subgraph. (A "tasks" event
+            # without "result" is the step *starting*.)
+            agent = namespace[0].split(":", 1)[0]
+            result = payload["result"] if isinstance(payload["result"], dict) else {}
+            print(
+                f"    [{agent}/{payload['name']}] {_describe_update(payload['name'], result)}",
+                file=sys.stderr,
+            )
+        elif stream_mode == "updates" and not namespace:
+            for node, update in payload.items():
+                if node == "__interrupt__":
+                    print("  [paused] review_draft is waiting for a human verdict", file=sys.stderr)
+                elif node == "supervisor":
+                    print(f"  [supervisor] {_describe_supervisor(update or {})}", file=sys.stderr)
+                elif node == "critic":
+                    print(f"  [critic] {_describe_critic(update or {})}", file=sys.stderr)
+                else:
+                    print(f"  [{node}] {_describe_update(node, update or {})}", file=sys.stderr)
+    print("--- end hand-offs ---", file=sys.stderr)
+
+    pending = None
+    if config is not None:
+        snapshot = graph.get_state(config)
+        if snapshot.interrupts:
+            pending = snapshot.interrupts[0].value
+    return state, pending
+
+
+def _print_multi_agent_pending(payload: dict, thread_id: str) -> None:
+    """A parked multi-agent run: the draft, and the critique it already passed."""
+    print("--- awaiting approval ---")
+    print(f"question: {payload.get('question', '')}")
+    if payload.get("critique"):
+        print(f"critic:   {payload['critique']}")
+    print("\ndraft:")
+    print(payload.get("draft", "") or "(empty draft)")
+    print("--- end draft ---")
+    print(
+        f"\n[paused] resume with: research-copilot multi-review --thread {thread_id}",
+        file=sys.stderr,
+    )
+
+
 def cmd_multi_agent(
     question: str,
     mode: str,
@@ -874,92 +979,227 @@ def cmd_multi_agent(
     max_writer_runs: int | None = None,
     critic: bool = False,
     max_revisions: int | None = None,
+    # --- 6.4 ---
+    thread_id: str | None = None,
+    checkpointer: str | None = None,
+    approve: bool = False,
+    memory_strategy: str | None = None,
+    max_history_tokens: int | None = None,
 ) -> None:
-    """One question through Researcher -> Writer, with every hand-off printed.
+    """One turn of the multi-agent graph, optionally on a persistent thread.
 
-    CONCEPT: streaming with subgraphs=True
-    `.invoke()` returns only the final state, which for this graph hides the
-    very thing 6.1 is about. So this command streams instead. With
-    `subgraphs=True`, every event carries a *namespace*: `()` for a step of the
-    parent graph, and `("researcher:<task-id>",)` for a step *inside* the
-    Researcher subgraph. The trace below indents the inner steps. You can
-    watch the private tool loop run, and then see that none of it appears in
-    the final state's `messages`.
+    6.4 brings Phase 4's persistence to this command, with Phase 4's exact
+    pattern: the thread_id goes in `config`, never in state; `--checkpointer`
+    picks the saver; `--approve` pauses at `review_draft` and needs a saver to
+    park in.
 
-    CONCEPT: which stream modes can see inside a subgraph's private state
-    Found while building this, and worth knowing before you trust a trace. For
-    a *nested* subgraph, the "updates" and "values" stream modes are narrowed
-    to the subgraph's output schema. A Researcher step that wrote only
-    `research_messages` shows up there as an empty update, as if it had done
-    nothing. The "tasks" mode (and "debug", which wraps it) reports each
-    task's full write, private keys included. So this trace uses three modes:
-
-        "updates"   parent-level steps: what each agent handed over
-        "tasks"     steps inside a subgraph: everything they wrote, private
-                    channel included
-        "values"    the parent's final state, the same dict `.invoke()`
-                    would have returned
-
-    The privacy boundary is therefore a *state* boundary, not a visibility
-    boundary. The tool loop is kept out of other agents' inputs and out of the
-    checkpoint, but a developer holding the stream can still watch it.
+    What is new is that the turn's *policy* goes into state (`run_policy`), so
+    that `multi-review` can rebuild the same graph without being told the same
+    flags again. See `run_policy` in multi_agent_state.py.
     """
     if mode == "knowledge-base" and _warn_if_empty_store():
         return
 
-    resolved_revisions = get_settings().max_revisions if max_revisions is None else max_revisions
     dispatch_caps = {}
     if max_researcher_runs is not None:
         dispatch_caps["researcher"] = max_researcher_runs
     if max_writer_runs is not None:
         dispatch_caps["writer"] = max_writer_runs
-    graph = build_multi_agent_graph(
+    policy = run_policy(
+        routing=routing,
+        enable_critic=critic,
+        require_approval=approve,
+        max_revisions=get_settings().max_revisions if max_revisions is None else max_revisions,
+        dispatch_caps=dispatch_caps or None,
         max_research_iterations=max_research_iterations,
         enable_planning=plan,
-        routing=routing,
-        dispatch_caps=dispatch_caps,
-        enable_critic=critic,
-        max_revisions=resolved_revisions,
+        memory_strategy=memory_strategy,
+        max_history_tokens=max_history_tokens,
     )
-    roster = "researcher, writer, critic" if critic else "researcher, writer"
+
+    with checkpointer_scope(checkpointer) as saver:
+        if approve and saver is None:
+            print(
+                "error: --approve needs a checkpointer: interrupt() parks the run "
+                "in one. Use --checkpointer memory or sqlite.",
+                file=sys.stderr,
+            )
+            return
+        thread, is_new = _resolve_thread(thread_id)
+        _announce_thread(thread, is_new, saver)
+        config = thread_config(thread) if saver is not None else None
+
+        graph = build_multi_agent_graph(**policy, checkpointer=saver)
+
+        if config is not None and not is_new:
+            existing = graph.get_state(config)
+            raw = _raw_channels(saver, thread)
+            if raw and not _is_multi_agent_thread(raw):
+                print(
+                    f"error: thread {thread!r} belongs to the single-agent graph "
+                    "(graph-agent / graph-chat). Start a new multi-agent thread.",
+                    file=sys.stderr,
+                )
+                return
+            if existing.interrupts:
+                # Found while writing the 6.4 tests. A new turn's input on a
+                # thread parked at review_draft does not fail: LangGraph starts
+                # the new turn and the parked draft is silently abandoned. The
+                # transcript then holds two human turns in a row (the
+                # unanswered one and the new one), which the Anthropic API
+                # rejects on the *next* call. Refuse instead: the pending
+                # decision has to be made first.
+                print(
+                    f"error: thread {thread} has a draft awaiting approval. Resolve "
+                    f"it first: research-copilot multi-review --thread {thread}",
+                    file=sys.stderr,
+                )
+                return
+
+        _announce_policy(policy)
+        state, pending = _stream_multi_agent(
+            graph, multi_agent_turn_input(question, mode, policy=policy), config
+        )
+
+        if pending is not None:
+            _print_multi_agent_pending(pending, thread)
+            _print_multi_agent_state(state)
+            return
+        print(final_answer(state))
+        _print_multi_agent_state(state)
+
+
+def _announce_policy(policy: dict) -> None:
+    roster = "researcher, writer, critic" if policy.get("enable_critic") else "researcher, writer"
+    gate = "; human approval on" if policy.get("require_approval") else ""
     print(
-        f"[routing] {routing}  (roster: {roster}; max revisions {resolved_revisions})",
+        f"[routing] {policy.get('routing', 'supervisor')}  (roster: {roster}; "
+        f"max revisions {policy.get('max_revisions')}{gate})",
         file=sys.stderr,
     )
 
-    state: dict = {}
-    print("--- hand-offs ---", file=sys.stderr)
-    for namespace, stream_mode, payload in graph.stream(
-        multi_agent_turn_input(question, mode),
-        stream_mode=["updates", "tasks", "values"],
-        subgraphs=True,
-    ):
-        if stream_mode == "values":
-            if not namespace:
-                state = payload
-        elif stream_mode == "tasks" and namespace and "result" in payload:
-            # A finished step inside an agent's subgraph. (A "tasks" event
-            # without "result" is the step *starting*.) The namespace's first
-            # segment is "<parent node>:<task id>", and only the node name is
-            # worth printing.
-            agent = namespace[0].split(":", 1)[0]
-            result = payload["result"] if isinstance(payload["result"], dict) else {}
+
+def _raw_channels(saver, thread_id: str) -> dict:
+    """The thread's latest parent checkpoint, as stored - not as any graph sees it.
+
+    CONCEPT (6.4): `graph.get_state()` is a *view*, filtered by that graph's schema
+    Found by a failing test. `get_state` returns only the channels the calling
+    graph declares. Ask the single-agent graph about a multi-agent thread and
+    `run_policy`, `supervisor_log`, `budgets` are simply not in the answer - so
+    a "which graph wrote this?" check built on `get_state` always concludes
+    "mine", and Phase 4's `review` went on to resume a multi-agent thread with
+    the wrong graph. The question of *whose* thread it is has to be asked of
+    the checkpointer directly.
+    """
+    found = saver.get_tuple(thread_config(thread_id))
+    return dict(found.checkpoint.get("channel_values", {})) if found else {}
+
+
+def _is_multi_agent_thread(values: dict) -> bool:
+    """Which graph wrote this thread? Both graphs share one checkpoint database,
+    so a thread_id alone does not say. `run_policy` is written by every
+    multi-agent turn since 6.4 and by nothing in the Phase 3-5 graph;
+    `supervisor_log` covers multi-agent threads from 6.2-6.3. Pass it RAW
+    channel values (`_raw_channels`), never `get_state().values`."""
+    return "run_policy" in values or "supervisor_log" in values
+
+
+def cmd_multi_review(
+    thread_id: str,
+    *,
+    checkpointer: str | None = None,
+    decision: str | None = None,
+    text: str = "",
+    note: str = "",
+) -> None:
+    """Phase 4's `review`, for a paused multi-agent thread. (6.4)
+
+    The same three steps: find the parked run from the thread_id alone, show
+    the question put to the human, resume with `Command(resume=verdict)`.
+
+    The difference is what this command does *not* take. Phase 5's `review`
+    needed `--critic` and `--max-revisions` repeated, because those lived in
+    closures and only State survives. Here the graph is rebuilt from the
+    thread's own `run_policy`, so the resume runs under exactly the policy the
+    pause was started under, whatever flags this process was given. A thread
+    written before 6.4 has no stored policy and is refused rather than guessed
+    at.
+    """
+    with checkpointer_scope(checkpointer) as saver:
+        if saver is None:
             print(
-                f"    [{agent}/{payload['name']}] {_describe_update(payload['name'], result)}",
+                "error: multi-review needs a checkpointer; a run parked with "
+                "--checkpointer none no longer exists.",
                 file=sys.stderr,
             )
-        elif stream_mode == "updates" and not namespace:
-            for node, update in payload.items():
-                if node == "supervisor":
-                    print(f"  [supervisor] {_describe_supervisor(update or {})}", file=sys.stderr)
-                elif node == "critic":
-                    print(f"  [critic] {_describe_critic(update or {})}", file=sys.stderr)
-                else:
-                    print(f"  [{node}] {_describe_update(node, update or {})}", file=sys.stderr)
-    print("--- end hand-offs ---", file=sys.stderr)
+            return
 
-    print(final_answer(state))
-    _print_multi_agent_state(state)
+        # A bare graph is enough to *read* the snapshot: get_state needs the
+        # saver and the thread_id, not the policy.
+        probe = build_multi_agent_graph(checkpointer=saver)
+        config = thread_config(thread_id)
+        snapshot = probe.get_state(config)
+
+        if not snapshot.values:
+            print(
+                f"error: thread {thread_id!r} has no saved state. Either the id is "
+                "wrong, or it was written by a different checkpointer "
+                f"(this one is {describe_checkpointer(saver)}).",
+                file=sys.stderr,
+            )
+            return
+        if not _is_multi_agent_thread(_raw_channels(saver, thread_id)):
+            print(
+                f"error: thread {thread_id!r} was written by the single-agent graph. "
+                f"Use: research-copilot review --thread {thread_id}",
+                file=sys.stderr,
+            )
+            return
+        policy = snapshot.values.get("run_policy")
+        if not policy:
+            print(
+                f"error: thread {thread_id!r} predates 6.4 and has no stored run "
+                "policy, so it cannot be resumed under a known configuration.",
+                file=sys.stderr,
+            )
+            return
+        if not snapshot.interrupts:
+            # The case to be careful with: a thread whose subgraphs have
+            # checkpoints of their own (the private channels, under
+            # researcher:/critic: namespaces) but nothing parked at the parent.
+            # Those subgraph checkpoints are history, not a pending decision.
+            print(
+                f"Thread {thread_id} exists but nothing is awaiting approval "
+                f"(next: {snapshot.next or 'idle'}).",
+                file=sys.stderr,
+            )
+            _print_multi_agent_state(snapshot.values)
+            return
+
+        payload = snapshot.interrupts[0].value
+        _print_multi_agent_pending(payload, thread_id)
+
+        if decision is None:
+            verdict: dict = _prompt_for_verdict()
+        elif decision == "edit":
+            verdict = {"decision": "edit", "text": text, "note": note}
+        elif decision == "reject":
+            verdict = {"decision": "reject", "note": note}
+        else:
+            verdict = {"decision": "approve"}
+
+        graph = build_multi_agent_graph(**policy, checkpointer=saver)
+        _announce_policy(policy)
+        state, pending = _stream_multi_agent(graph, Command(resume=verdict), config)
+
+        if pending is not None:
+            # A rejection went round a revision and reached the gate again.
+            print(f"\n[revised] revision {state.get('revisions', 0)}", file=sys.stderr)
+            _print_multi_agent_pending(pending, thread_id)
+            _print_multi_agent_state(state)
+            return
+        print(final_answer(state))
+        _print_multi_agent_state(state)
 
 
 def _print_multi_agent_state(state: dict) -> None:
@@ -1321,6 +1561,23 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # --- Phase 6 ---
+    multi_review_parser = subparsers.add_parser(
+        "multi-review",
+        help="Show a paused multi-agent thread and approve/reject/edit it (6.4)",
+    )
+    multi_review_parser.add_argument("--thread", required=True, help="The paused thread_id")
+    multi_review_parser.add_argument(
+        "--checkpointer", choices=list(KINDS), default=None,
+        help="Must match the checkpointer that wrote the thread",
+    )
+    multi_verdict = multi_review_parser.add_mutually_exclusive_group()
+    multi_verdict.add_argument("--approve", action="store_true", help="Accept the draft as written")
+    multi_verdict.add_argument("--reject", action="store_true", help="Send it back (give --note)")
+    multi_verdict.add_argument("--edit", metavar="TEXT", default=None, help="Accept this text instead")
+    multi_review_parser.add_argument("--note", default="", help="Why - recorded as human_feedback")
+    # Deliberately no --critic / --max-revisions here, unlike Phase 5's review:
+    # the policy is read from the thread (see cmd_multi_review).
+
     multi_parser = subparsers.add_parser(
         "multi-agent",
         help="Researcher agent -> Writer agent, with hand-offs printed (Phase 6.1)",
@@ -1369,6 +1626,14 @@ def main(argv: list[str] | None = None) -> int:
             "How many times the Supervisor may dispatch the Writer per turn "
             "(default 2 + max revisions)"
         ),
+    )
+    # 6.4: Phase 4's persistence flags (--checkpointer, --approve, --memory,
+    # --max-history-tokens), shared with graph-agent, plus --thread.
+    _add_phase4_flags(multi_parser)
+    multi_parser.add_argument(
+        "--thread",
+        default=None,
+        help="Continue an existing multi-agent conversation (the id is printed on each run)",
     )
     multi_parser.add_argument(
         "--critic",
@@ -1466,6 +1731,26 @@ def main(argv: list[str] | None = None) -> int:
                 max_writer_runs=args.max_writer_runs,
                 critic=args.critic,
                 max_revisions=args.max_revisions,
+                thread_id=args.thread,
+                checkpointer=args.checkpointer,
+                approve=args.approve,
+                memory_strategy=args.memory_strategy,
+                max_history_tokens=args.max_history_tokens,
+            )
+        elif args.command == "multi-review":
+            decision = None
+            if args.approve:
+                decision = "approve"
+            elif args.reject:
+                decision = "reject"
+            elif args.edit is not None:
+                decision = "edit"
+            cmd_multi_review(
+                args.thread,
+                checkpointer=args.checkpointer,
+                decision=decision,
+                text=args.edit or "",
+                note=args.note,
             )
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)

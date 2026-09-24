@@ -29,7 +29,7 @@ next, not to ship the final system as fast as possible.
 - [x] **Phase 5: Multi-step reasoning.** A reflection loop (draft → critique →
   revise, looping back until a quality threshold or max iterations) and a
   planning node that splits the question into sub-questions before research.
-- [ ] **Phase 6: Multi-agent.** Researcher, Writer, and Critic nodes coordinated
+- [x] **Phase 6: Multi-agent.** Researcher, Writer, and Critic nodes coordinated
   by a Supervisor that routes on structured LLM output. Each agent has its own
   tools and system prompt. Built in four reviewed steps:
   - [x] 6.1 Researcher (subgraph, private tool loop) → Writer (node), fixed
@@ -38,7 +38,8 @@ next, not to ship the final system as fast as possible.
     a decision log, and the Researcher's brief/outcome/merge-on-rerun contract
   - [x] 6.3 Critic agent (subgraph, `verify_citation`), rejections classified by
     the Supervisor, per-agent round budgets, graph-level human gate
-  - [ ] 6.4 CLI flags (`--critic`/`--approve`/`--plan`), threads, Studio
+  - [x] 6.4 threads, `multi-review`, stored run policy, pruning, `begin_turn`,
+    Studio demo graph, this reference (see "Phase 6: Multi-agent (reference)")
 - [ ] **Phase 7: Production.** Streaming via `astream_events`, per-node error
   handling, retries and fallback models, LangSmith dataset evaluation, and a
   FastAPI wrapper around the compiled graph (or LangGraph Studio).
@@ -742,12 +743,21 @@ src/research_copilot/
   graph.py         the hand-rolled StateGraph: nodes, edges, routing (Phase 3, 4)
   prebuilt.py      the same agent via create_react_agent, for comparison (Phase 3)
   checkpointing.py checkpointer factory + the thread_id vs State notes (Phase 4)
+  multi_agent_state.py  Phase 6 State: one owner per field, budgets, contracts
+  multi_agent_graph.py  Phase 6 graph: the Supervisor hub, reviews, revisions
+  agents/          researcher.py (subgraph), writer.py (node), critic.py (subgraph),
+                   supervisor.py (routing + guards) - Phase 6
+  tools/citations.py    @tool verify_citation, the Critic's tool (Phase 6)
+  pruning.py       Phase 4's prune_history as a factory, for the Phase 6 graph
+  studio_demo.py   the Phase 6 graph with scripted models, for offline Studio runs
   cli.py           command-line entry point
-langgraph.json     tells LangGraph Studio where the graphs are (Phase 3)
+langgraph.json     tells LangGraph Studio where the graphs are (Phase 3; Phase 6 adds two)
 data/chroma/       the local vector store (gitignored, created by `ingest`)
 data/checkpoints.sqlite3  the checkpoint database (gitignored, Phase 4)
 tests/             offline tests using fake models
                    test_reflection.py / test_planning.py are Phase 5
+                   test_multi_agent*.py, test_supervisor.py, test_critic_agent.py,
+                   test_citations.py, test_revisions_and_budgets.py are Phase 6
 ```
 
 `agent_loop.py` and `retrieval.py` stay in place on purpose. `graph.py` is
@@ -836,249 +846,429 @@ to see exactly what changed.
 | Config a resume must repeat (closures vs State) | `cli.py` → `cmd_review` |
 | What Phase 6 needs on top of this | `graph.py` (bottom, PHASE 6 NOTE) |
 
-## Usage (Phase 6.1)
+## Phase 6: Multi-agent (reference)
 
-Phase 5's `call_model` did two jobs: it looked things up, and it wrote the
-answer. 6.1 gives each job to its own agent, in a new graph
-(`multi_agent_graph.py`) beside the old one. `graph-agent` still runs Phase 5's
-graph, unchanged.
+Phase 5 had one `call_model` node that searched, wrote, and revised: one model
+wearing several prompts. Phase 6 splits that work across three agents
+coordinated by a Supervisor, in a **new graph** (`multi_agent_graph.py`).
+Phase 5's `graph.py` and `state.py` are untouched, and `graph-agent` still runs
+them.
 
-```bash
-research-copilot multi-agent "How are RAG pipelines evaluated?"
-research-copilot multi-agent "What do my notes say about chunking?" --mode knowledge-base
-research-copilot multi-agent "Compare RAG and long-context models on cost" --plan
-research-copilot multi-agent "..." --max-research-iterations 2   # watch the budget fallback
-research-copilot draw-graph multi     # xray view: the Researcher's inside is drawn
-```
-
-The command prints every hand-off as it happens. Steps inside the Researcher's
-subgraph are indented:
-
-```
---- hand-offs ---
-  [plan_question] (no change)
-    [researcher/research_model] research_messages=[1], research_iterations=1
-    [researcher/research_tools] research_messages=[1]
-    [researcher/research_model] research_messages=[1], research_iterations=2
-    [researcher/compile_notes] research_notes='Findings: ...'
-  [researcher] research_notes='Findings: ...', research_iterations=2
-  [writer] draft='...'
-  [finalize_answer] messages=[1]
-```
-
-Notice that `research_messages` appears only on the indented lines. The final
-state's `messages` holds exactly one question and one answer.
+This section is the reference to read before Phase 7. It describes the system
+as it stands after 6.4, not the order it was built in (that is in the
+`phase-6` commits: 6.1 agents, 6.2 Supervisor, 6.3 Critic and budgets,
+6.4 persistence, Studio, and this document).
 
 ### The shape
 
 ```
-START → plan_question → [researcher subgraph] → writer → finalize_answer → END
-                          ├ knowledge-base: retrieve
-                          └ live-search:    research_model ⇄ research_tools → compile_notes
+START → begin_turn → prune_history → plan_question → supervisor ─┬─ researcher ─┐   (Researcher: subgraph)
+                                                         ↑        ├─ writer ─────┤   (Writer: node)
+                                                         │←───────┴──────────────┘
+                                                         │
+                                                         │        ├─ critic ──after_critique──┬─ approve ─→ review_draft* / finalize_answer
+                                                         │        │  (subgraph)               ├─ reject, rounds left ─→ start_revision ─┐
+                                                         │        │                           └─ reject, rounds spent → finalize_answer │
+                                                         │        └─ finish ─→ review_draft* / finalize_answer                          │
+                                                         └───────────────────────────────────────────────────────────────────────────────┘
+review_draft* ──after_review──┬─ approve / edit → finalize_answer
+                              ├─ reject, rounds left → start_revision → supervisor
+                              └─ reject, rounds spent → finalize_answer (withheld)        * only with --approve
 ```
 
-Every edge is fixed. 6.2 replaces the middle ones with a Supervisor.
+Every agent reports back to the Supervisor. A rejection from either
+reviewer counts a revision in `start_revision` and then goes to the
+Supervisor, which decides who fixes it. There is no edge from any reviewer to
+the Writer.
 
-### One field, one owner
-
-| Field | Owner | Enforced by |
-| --- | --- | --- |
-| `sub_questions` | `plan_question` | `owns()` wrapper |
-| `research_notes`, `documents`, `research_iterations` | `researcher` | the subgraph's `output_schema` |
-| `draft` | `writer` | `owns()` wrapper |
-| `messages` | `finalize_answer` | `owns()` wrapper |
-| everything above, between turns | the turn boundary (`multi_agent_turn_input`) | — |
-
-A node that returns a key it does not own raises `OwnershipError`.
-
-### Subgraph vs. node
-
-The Researcher is a subgraph because it has a loop (search → read → search) and
-scratch work nobody else should read. The Writer is a plain node because it
-makes one model call with no tools. The rule: **promote an agent to a subgraph
-when it has a loop or state of its own, not because it is "an agent".**
-
-The Researcher's tool loop goes to a private `research_messages` channel. It is
-kept out of the shared transcript, out of the Writer's input, and out of
-`get_state()`. It is **not** kept off the disk: the subgraph checkpoints under
-its own namespace (`researcher:<task-id>`), and those checkpoints hold every
-search result.
-
-## Usage (Phase 6.2)
-
-The fixed line is now a hub. Every agent reports back to a Supervisor, which
-decides who acts next from a structured model reply:
-
-```
-START → plan_question → supervisor ⇄ researcher
-                            ⇅
-                          writer
-                            ↓ finish
-                     finalize_answer → END
-```
+### Running it
 
 ```bash
-research-copilot multi-agent "How are RAG pipelines evaluated?"            # a model routes
-research-copilot multi-agent "..." --routing fixed                         # 6.1's path, no model
-research-copilot multi-agent "..." --max-researcher-runs 3 --max-writer-runs 1
+research-copilot multi-agent "How are RAG pipelines evaluated?"                 # Supervisor routes (needs a key)
+research-copilot multi-agent "..." --routing fixed                              # research -> write -> finish, no Supervisor model
+research-copilot multi-agent "..." --critic                                     # Critic on the roster
+research-copilot multi-agent "..." --critic --approve                           # ...then a human, after the Critic
+research-copilot multi-review --thread <id> [--approve | --reject --note ".." | --edit ".."]
+research-copilot multi-agent "follow-up" --thread <id>                          # next turn, same conversation
+research-copilot multi-agent "..." --mode knowledge-base --plan
+research-copilot draw-graph multi                                               # both subgraphs expanded (xray)
 ```
 
-Each decision is printed with its rationale. Any override is printed beside
-what the model proposed:
+Every run prints its hand-offs as they happen. Supervisor decisions show their
+rationale, and any override appears beside what the model proposed. Steps
+inside a subgraph are indented:
 
 ```
-  [supervisor] -> researcher  brief='evidence RAGAS agrees with human judgement'
-      why: Draft makes no claim about validation; notes list that as a gap.
-  ...
-  [supervisor] -> writer  (proposed finish; OVERRIDDEN: finish proposed with a draft that predates the latest research)
-      why: Looks complete.
-```
-
-### What the Supervisor reads, and what it returns
-
-| Reads (`render_supervisor_view`) | Returns (`SupervisorDecision`) |
-| --- | --- |
-| question, sub-questions | `rationale`: written *first*, so the route is conditioned on it |
-| research notes (excerpted) and `research_outcome` | `next`: `researcher` / `writer` / `finish` |
-| draft, marked STALE if it predates the latest notes | `researcher_brief`: what a follow-up pass should find |
-| dispatches used / cap per agent | |
-| its own earlier decisions this turn | |
-
-The reply uses `with_structured_output(..., method="json_schema")`, the
-Anthropic API's native structured output. The default `function_calling`
-method forces a tool call, which the API rejects when thinking is on.
-
-### Code guards have the last word
-
-| Guard | Proposal | Routed to |
-| --- | --- | --- |
-| agent's dispatch cap reached | that agent | `fixed_policy`'s choice |
-| no research yet | `writer` | `researcher` |
-| no draft, or a stale one | `finish` | `writer` (if budget remains) |
-| model output raises or fails validation | — | `fixed_policy` (6.1's hand-off) |
-
-Every route except `finish` spends a capped dispatch, so a turn makes at most
-`sum(caps) + 1` decisions whatever the model says.
-`tests/test_supervisor.py::test_no_supervisor_can_loop_forever` checks this
-against Supervisors that always research, always write, always finish, or
-ping-pong.
-
-### The Researcher's 6.2 contract
-
-- **`researcher_brief`** (the Supervisor writes it, the Researcher reads it):
-  what this pass should look for. It is reset on every research dispatch, so an
-  old brief never steers a new pass.
-- **`research_outcome`** (the Researcher writes it): `findings` /
-  `nothing_found` / `budget_exhausted` for the *latest* pass. The guards branch
-  on this, not on text inside the notes.
-- **Merge-on-rerun**: a follow-up pass appends under a code-written header, and
-  never rewrites. Knowledge-base excerpts keep their `[n]` numbers. A pass that
-  finds nothing leaves the notes unchanged.
-
-## Usage (Phase 6.3)
-
-```bash
-research-copilot multi-agent "How are RAG pipelines evaluated?" --critic
-research-copilot multi-agent "..." --critic --max-revisions 1
-research-copilot draw-graph multi     # researcher and critic both drawn as subgraphs
-```
-
-The Critic is Phase 5's `critique_draft` promoted to an agent. It keeps the
-same APPROVE/REJECT first line and the same fail-closed parser (imported, not
-copied). It adds a `verify_citation` tool (arXiv lookup by id) and the research
-notes as input, so it checks claims against the evidence and citations against
-arXiv. Its verification calls go to a private `critic_messages` channel,
-exactly like the Researcher's tool loop. The tests for that were written
-before the Critic was.
-
-A rejection counts against `revisions` and then goes to the **Supervisor**,
-which decides whose problem it is:
-
-```
+  [supervisor] -> critic  (proposed finish; OVERRIDDEN: finish proposed before the critic approved this draft)
+      why: Draft ready.
+    [critic/critic_model] critic_messages=[1], critic_iterations=1
+    [critic/critic_tools] critic_messages=[1]
+    [critic/compile_verdict] verdict='reject', critique='Writing: cites ARES ...', citation_checks=[2], ...
   [critic] REJECT  checks: 2309.15217=found, 2311.09476=found
-      note: Writing: cites ARES (2311.09476), which exists but is not in the research notes
-  [start_revision] revisions=1, budgets={... all used: 0}
+      note: Writing: cites ARES (2311.09476), which exists but is not in the research notes - the Writer added it.
+  [start_revision] revisions=1, budgets={... used: 0 ...}
   [supervisor] -> writer
       why: Critic says the Writer added a source not in the notes: a writing problem.
 ```
 
+### The agents
+
+| Agent | Shape | Tools | Reads | Writes (owns) |
+| --- | --- | --- | --- | --- |
+| Researcher | subgraph (tool loop) | `search_arxiv` / retriever | question, mode, plan, transcript, summary, `researcher_brief`, its own previous notes | `research_notes`, `documents`, `research_iterations`, `research_outcome`, `budgets["researcher"]` |
+| Writer | node (one call) | none | question, plan, transcript, summary, notes, critique + human feedback on a revision | `draft`, `budgets["writer"]` |
+| Critic | subgraph (verification loop) | `verify_citation` | question, plan, draft, research notes | `critique`, `verdict`, `citation_checks`, `budgets["critic"]` |
+| Supervisor | node (structured output) | none | everything above, excerpted, plus its own log | `next_agent`, `researcher_brief`, `dispatches`, `supervisor_log` |
+
+**Subgraph vs. node.** Make an agent a subgraph when it has a loop, or state
+it must keep to itself. Otherwise make it a node. The Researcher and Critic
+loop over tools and produce scratch work nobody else should read; the Writer
+makes one call. An agent is a role, not a unit of graph structure.
+
+**Private channels.** The Researcher's tool loop runs in `research_messages`,
+and the Critic's verifications in `critic_messages`. Neither is in
+`MultiAgentState` or in the subgraph's output schema, so neither reaches the
+shared transcript, another agent's input, or `get_state()`. Two things
+"private" does **not** mean:
+
+- **Not off disk.** With a checkpointer, each subgraph checkpoints under its
+  own namespace (`researcher:<task-id>`, `critic:<task-id>`), and those
+  checkpoints hold every search result and verification. If a tool result
+  must never be persisted, keep it out of the checkpointer. A private key does
+  not do that.
+- **Not invisible while running.** In the `updates` and `values` stream modes,
+  a nested subgraph's steps are narrowed to its output schema, so a step that
+  wrote only its private channel looks like it did nothing. The `tasks` mode
+  shows the full write. The CLI trace uses `tasks` for inner steps for this
+  reason.
+
+Each channel has two protections: a name the parent does not have, and an
+output schema that filters it. Removing either one alone leaks nothing;
+removing both leaks (the tests check each case).
+
+**The Researcher's contract across passes.** The Supervisor can send the
+Researcher back with a `researcher_brief`. A follow-up pass **merges**: code
+appends the new findings under a header naming the brief, and never lets the
+model rewrite earlier notes. Knowledge-base excerpts keep their `[n]` numbers.
+`research_outcome` (`findings` / `nothing_found` / `budget_exhausted`)
+describes the latest pass as a fact the guards can branch on.
+
+**The Critic** is Phase 5's `critique_draft` promoted to an agent. It keeps
+the same APPROVE/REJECT first line and the same fail-closed parsers, imported
+from `graph.py`, not copied. What it adds: it reads the research notes, and it
+checks each arXiv citation with `verify_citation`, which returns FOUND,
+NOT FOUND, INVALID or ERROR. **ERROR is not evidence against a citation.** A
+timed-out lookup must not reject a draft, and the prompt says so. Running out
+of budget mid-verification counts as a rejection (fail closed).
+
+### One field, one owner
+
+During a turn, every state key has exactly one writer. Plain nodes are
+wrapped in `owns(...)`, which raises `OwnershipError` if a node returns a key
+(or a `budgets` entry) it does not own. Subgraphs are held to the rule by
+their `output_schema`, and a test keeps each schema equal to its `OWNERS`
+entry.
+
+The deliberate exceptions, each written down:
+
+| Writer | Writes | Why it is allowed |
+| --- | --- | --- |
+| `begin_turn` | every per-turn field | it is the turn boundary. It runs at START, before any agent, for every caller |
+| `prune_history` | `messages` (removals), `summary` | runs once, at the start of the turn, never while an agent works. `finalize_answer` only appends, at the end |
+| `start_revision` | every agent's `budgets` entry, `revisions` | the per-round reset site |
+
+A human edit goes into `human_edit`, never into the Writer's `draft`. The
+final state shows both.
+
+**The turn reset is a node, not an input helper.** Through 6.3 the per-turn
+reset lived in `multi_agent_turn_input`. Studio does not call that helper, and
+neither will Phase 7's API, so a second turn in Studio inherited the first
+turn's dispatch counts, revisions and log. `begin_turn` fixes that for every
+caller. It is safe to run unconditionally because START is only entered by a
+new turn: a resume re-enters at the parked node.
+
+### The Supervisor
+
+- **Why a model:** "which agent should fix this critique?" means reading the
+  critique against the notes. "Cites a paper that is not in the notes" is the
+  Writer's fault even though it is about a citation. That is a judgement, not
+  a lookup.
+- **Structured output:** `with_structured_output(SupervisorDecision,
+  method="json_schema")`. This uses the API's native structured output, which
+  constrains generation to the schema. The default `function_calling` method
+  forces a tool call, which the API rejects when thinking is on (and newer
+  models reject forced tool calls outright).
+- **Rationale first:** `rationale` precedes `next` in the schema, so the route
+  is generated after the reasoning, not justified afterwards.
+- **What it sees** (`render_supervisor_view`): the question and plan; notes
+  (excerpted, with truncation marked) and `research_outcome`; the draft,
+  marked STALE or REJECTED when it is; the critique, marked current or earlier,
+  plus the citation checks; human feedback; revisions used; per-agent
+  dispatches and round budgets; its own earlier decisions. It never sees a
+  private channel.
+- **Code guards have the last word** (`apply_guards`):
+
+| Guard | Proposal | Routed to |
+| --- | --- | --- |
+| agent not on the roster (e.g. Critic with `--critic` off) | that agent | `fixed_policy` |
+| dispatch cap reached, or round budget spent | that agent | `fixed_policy` |
+| no research yet | `writer` | `researcher` |
+| draft missing, stale, or rejected | `critic` / `finish` | `writer` |
+| Critic on, and it has not approved *this* draft | `finish` | `critic` |
+| output raises or fails validation | — | `fixed_policy` (the attempted route is still logged when recoverable) |
+
+  A guard never routes to an agent that is unavailable. Every route except
+  `finish` spends a capped dispatch, so a turn makes at most
+  `sum(dispatch caps) + max_revisions + 1` decisions, **whatever the model
+  says**. Tests check this against adversarial scripts.
+- **The log** (`supervisor_log`) records, per decision: what the model
+  proposed, where the run went, why they differ, the brief, and the revision
+  number. This is the debugging surface, and what Phase 7's evaluation should
+  read.
+
 ### Staleness, from dispatch order alone
 
-| Question | Answer, derived from `supervisor_log` |
+No `critiqued_draft` field and no hashes. The log's order already holds the
+answer.
+
+| Question | Derived from `supervisor_log` |
 | --- | --- |
-| Is the draft stale? (6.2) | the last dispatch was the Researcher, and its pass changed the notes |
-| Was the draft rejected and not yet rewritten? | no Writer dispatch stamped with the current revision |
-| Is the critique current? | the Critic was dispatched after the last Writer dispatch |
+| Is the draft stale? | the last dispatch was the Researcher, and that pass changed the notes |
+| Was the draft rejected and not rewritten? | `revisions > 0`, and no Writer dispatch is stamped with the current revision |
+| Is the critique current? | the Critic was dispatched after the last Writer dispatch (one rewrite since or three, it is stale either way) |
 
-A stale approval approves nothing. `finish` on a draft whose approval predates
-it goes back to the Critic.
+A stale *rejection* is normal: it is the reason the Writer is revising. A
+stale *approval* approves nothing.
 
-### Four counters, three scopes
+### Counters: four of them, three scopes
 
-| Counter | Scope | Reset by | Bounds |
+| Counter | Scope | Reset by | What it bounds |
 | --- | --- | --- | --- |
-| `research_iterations` | one Researcher pass | (private start) | — (a report) |
-| `budgets[agent]["used"]` | one revision round | `start_revision` | work inside a round |
-| `dispatches[agent]` | one turn | turn boundary only | the hub (termination) |
-| `revisions` | one turn | turn boundary only | rejection rounds |
+| `research_iterations` | one Researcher pass | (private start) | nothing: a report of that pass |
+| `budgets[agent]["used"]` | one **revision round** | `start_revision` | work inside a round, e.g. a Researcher sent back twice in a round shares one tool budget |
+| `dispatches[agent]` | one **turn** | `begin_turn` only, **never** `start_revision` | the hub: termination |
+| `revisions` | one **turn** | `begin_turn` only | rejection rounds (`max_revisions`) |
 
-`dispatches` is deliberately never reset by a revision. It is the number that
-means "how many times this turn sent work to that agent", and the termination
-bound depends on it. A mutation that reset it per revision broke the
-no-infinite-loop test.
+`dispatches` is the number to read as "how many times this turn sent work to
+that agent". It means that and nothing else, because it is reset on exactly
+one schedule. A mutation that reset it per revision broke the termination
+test. Dispatch caps default to room for every allowed revision: Writer
+`2 + max_revisions`, Critic `1 + max_revisions` (0 when off), Researcher 2.
 
-`budgets` is a TypedDict per agent (`{used, cap}`) under a per-agent,
-per-field merge reducer. Each agent writes only its own entry: `owns()`
-enforces that for plain nodes. The subgraphs return the whole dict as
-passthrough, which is a no-op while nodes run one at a time (see the note in
-`owns`).
+`budgets` is `dict[str, AgentBudget]`, where `AgentBudget` is a TypedDict
+`{used, cap}`. A TypedDict rather than a dataclass because it is a plain dict:
+it serializes into checkpoints and shows in Studio like everything else. It is
+reduced by `merge_budgets`, which merges per agent *and* per field, so the
+Writer's update cannot erase the Researcher's entry, and a reset can write
+`{"used": 0}` without knowing the cap. `cap` in state is a record for readers;
+enforcement reads the build config.
+
+### Schema migration: reducer-backed keys vs. plain keys
+
+**Read this before adding or renaming a key.** An old thread (checkpointed
+before a key existed) reads back *differently* depending on how the key is
+declared, and the difference is easy to get backwards by analogy:
+
+| Declared as | On a thread from before the key existed | Example |
+| --- | --- | --- |
+| plain key (`verdict: str`) | **missing**: `"verdict" not in state` | `state.get("verdict", "")` is correct |
+| reducer-backed (`budgets: Annotated[dict, merge_budgets]`) | **present and empty**: `state["budgets"] == {}` | `"budgets" in state` is `True`, which says nothing |
+
+LangGraph gives every reducer channel an empty default, so a presence check
+on a reducer-backed key is always true, and "is this an old thread?" gets the
+wrong answer. The same applies to `messages` and any future `Annotated` key.
+
+**`budget_of(state, agent, default_cap)` is the only sanctioned way to read a
+budget.** It treats absent, empty, and partially-filled entries the same:
+"nothing used, configured cap", which is exactly what an agent that has not
+run this round has spent. Never index `state["budgets"][agent]` directly.
+`tests/test_revisions_and_budgets.py::test_a_pre_6_3_thread_with_no_budgets_resumes_cleanly`
+pins both behaviours.
+
+A related trap, found in 6.4: **`graph.get_state()` is filtered by the reading
+graph's schema.** Ask the single-agent graph about a multi-agent thread and
+the multi-agent keys are simply absent. So "which graph wrote this thread?"
+must be asked of the checkpointer's raw channel values (`_raw_channels` in
+`cli.py`), never of `get_state()`. The first version of the cross-graph guard
+used `get_state()`, and Phase 4's `review` resumed a multi-agent thread with
+the wrong graph.
+
+### Persistence and review
+
+- `--thread` / `--checkpointer` / `--approve` / `--memory` /
+  `--max-history-tokens` work exactly as on `graph-agent` (Phase 4). The
+  thread_id goes in `config`, never in state.
+- **`run_policy` is stored in state.** Phase 5's `review` had to be given
+  `--critic` and `--max-revisions` again, because closures do not survive a
+  process. Phase 6 has far more such configuration, so each turn writes its
+  build policy into state, and `multi-review` rebuilds the graph from it. A
+  resume cannot run under a different policy from the pause. A *new turn* may
+  change it (`--critic` on turn 2 only is fine).
+- **Refusals, each for a reason:**
+  - `multi-agent --thread X` while X is paused at review → refused. LangGraph
+    would start the new turn, abandon the draft, and leave two human turns
+    adjacent, which the Anthropic API rejects on the next call.
+  - `review` on a multi-agent thread, `multi-review` on a single-agent thread
+    → refused. Both graphs share one checkpoint DB.
+  - `multi-review` on a multi-agent thread from before 6.4 (no `run_policy`)
+    → refused rather than resumed under a guessed policy.
+  - `multi-review` where only subgraph checkpoints exist and nothing is parked
+    → "nothing is awaiting approval". Subgraph checkpoints are history, not a
+    pending decision.
+- **Pruning** (`prune_history`, Phase 4's node via `pruning.py`) runs at the
+  entry. This transcript is small by construction: two messages per turn,
+  because tool and verification traffic lives in private channels. But a
+  long-lived thread still grows without bound, so pruning is on by default. It
+  never runs mid-turn: a resume re-enters at the parked node.
 
 ### Flag meanings across phases
 
-| Flag | Phase 5 (`graph-agent`) | Phase 6.3 (`multi-agent`) |
-| --- | --- | --- |
-| `--critic` | a `critique_draft` node reviews every draft; a rejection goes back to `call_model` | puts the Critic agent on the Supervisor's roster; it verifies citations; a rejection goes to the Supervisor to be classified |
-| `--max-revisions` | rejection rounds per turn | same, from either reviewer; also scales the Writer/Critic dispatch caps |
-| `--approve` | human gate, after the critic when both are on | same meaning at graph level (`require_approval`); the CLI flag arrives in 6.4 with `--thread`/`review` |
-| `--plan` | `plan_question` before research | unchanged |
+Flags keep their names across phases, not always their meaning. `graph-agent`
+keeps its Phase 5 meanings; `multi-agent` has these:
 
-`graph-agent` keeps its Phase 5 meanings for every flag.
+| Flag | Phase 4 | Phase 5 (`graph-agent`) | Phase 6 (`multi-agent`) |
+| --- | --- | --- | --- |
+| `--critic` | — | a `critique_draft` node reviews every draft; a rejection goes back to `call_model` | puts the Critic *agent* on the Supervisor's roster; it verifies citations against arXiv and the draft against the notes; a rejection goes to the Supervisor, which picks the Researcher or Writer |
+| `--max-revisions` | — | rejection rounds per turn | same, from either reviewer; also sizes the Writer/Critic dispatch caps |
+| `--approve` | human gate before commit | same; after the critic when both are on | same: after the Supervisor finishes, after the Critic approves when both are on; resumed with `multi-review`; a human rejection is classified by the Supervisor too |
+| `--plan` | — | `plan_question` before research | unchanged |
+| `--routing` | — | — | `supervisor` (a model decides) or `fixed` (research → write → [critic] → finish, no model) |
 
-## Where each Phase 6 concept lives
+### Studio
+
+```bash
+pip install -e ".[studio]"
+langgraph dev --allow-blocking
+# then open https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+```
+
+`langgraph.json` registers four graphs. Two are Phase 6:
+
+- **`multi_agent`**: the real graph. Studio can *draw* it without a key.
+  Running it needs `ANTHROPIC_API_KEY`.
+- **`multi_agent_demo`** (`studio_demo.py`): the same graph with scripted
+  models and stub tools. It runs offline and takes the same instructive path
+  every time: research, draft, finish overridden to the Critic, rejection
+  classified as a writing problem, rewrite, approval.
+
+What was verified against the dev server's API (the data Studio renders):
+the collapsed graph shows `researcher` and `critic` as single nodes; xray
+expands both into their loops, and `writer` has nothing inside. The subgraph
+state schemas include the private channels. The parent thread state never
+contains them. The `tasks` stream carries the private writes, while the
+`updates` stream shows those inner steps as empty. After the `begin_turn`
+fix, turn 2 on a thread starts from fresh counters.
+
+Things that look odd in Studio and are deliberate:
+
+- `review_draft` and the Critic are drawn even when a run cannot reach them
+  (one graph shape, whatever the flags).
+- Conditional edges have no labels. The drawing shows what is *possible*; the
+  run timeline and `supervisor_log` show what *happened*.
+- An inner Critic or Researcher step can show an empty update in Studio's
+  updates view (see "private channels" above).
+- A thread started in Studio has no `run_policy`, so `multi-review` refuses
+  to resume it. Studio threads are for looking at, not for the CLI.
+
+### What needs a real `ANTHROPIC_API_KEY`
+
+Everything below is untested. The fakes fix every model reply in advance, so
+they cannot say whether a real model behaves this way:
+
+1. **Structured output in this configuration.** `json_schema` together with the
+   server-side-fallback beta that `get_chat_model()` sends. Check this first:
+   if it fails, every Supervisor decision falls back to the fixed policy, and
+   the log shows `proposed: None ... fallback`.
+2. **Supervisor routing quality.** Does it classify critiques correctly (evidence
+   → Researcher, writing → Writer), write briefs that actually change the
+   searches, avoid re-researching on the same brief after `nothing_found`, and
+   finish neither too early nor too late? The core claim of Phase 6.
+3. **Rationale vs. route.** Nothing checks that the rationale supports the route
+   it sits beside. It has to be read.
+4. **Researcher.** Does it write notes (not an answer) in the requested format,
+   copy URLs verbatim, write *only new* findings on a follow-up, and answer
+   `NOTHING NEW` exactly when it finds nothing?
+5. **Writer.** Does it cite only what the notes contain, say plainly when notes
+   are empty (`NO_NOTES`) rather than answering from memory, and actually
+   address the critique on a revision?
+6. **Critic.** Does it call `verify_citation` at all, distinguish evidence from
+   writing problems in its note, ignore ERROR results as instructed, and
+   approve good drafts (Phase 5's "a critic always finds something")?
+7. **Cost and latency.** Every hop is a Supervisor call. The happy path with the
+   Critic is about 3 Supervisor + 1-2 Researcher + 1 Writer + 1-2 Critic calls.
+   A revision adds roughly 3-4 more.
+8. **Real arXiv.** Whether a nonexistent id returns an empty feed (assumed) or
+   an error entry, and whether the shared 3-second throttle holds up with both
+   tools active.
+9. **Studio, visually.** The API-level checks above were run; opening the UI and
+   looking at the rendering was not (see the 6.4 report).
+
+### Open going into Phase 7
+
+**Blocking for any parallel fan-out design:**
+
+- **Budget passthrough from subgraphs is a lost-update bug under concurrency.**
+  The Researcher and Critic subgraphs read `budgets` and return the *whole*
+  dict: their own entry, plus every other agent's entry passed through
+  unchanged. Under `merge_budgets` that passthrough is a no-op **only because
+  nodes run one at a time**. The moment two branches run in parallel (two
+  Researchers on different sub-questions, or Researcher and Critic together),
+  each merges a full-dict snapshot taken before the other's update, and the
+  later merge silently restores the earlier value. `owns()` cannot catch this,
+  because subgraphs are not wrapped and output schemas work per key, not per
+  entry. **Resolve before fan-out:** per-agent keys (`researcher_budget`, ...)
+  or a delta reducer, not a cleverer merge.
+  `test_subgraph_budget_passthrough_leaves_other_entries_alone` pins the
+  sequential behaviour only.
+
+Also open:
+
+- **Private channels are persisted.** Every search result and verification is in
+  the checkpoint DB under subgraph namespaces. Deployment needs a retention or
+  deletion story (`delete_thread` is the only thing that removes them).
+- **Cost:** a Supervisor model call per hop, including hops the guards would
+  have forced anyway. Skipping the call when only one route is legal would
+  change what the log records, so it is left undecided.
+- **No quality measurement.** Routing, classification, citation checking, and
+  answer quality have no evaluation. `supervisor_log` (proposed vs. routed,
+  overrides, rationale, revision) and the counter scope table above are the
+  inputs a LangSmith dataset evaluation should read.
+- **Streaming UX:** the CLI streams hand-offs, but not tokens (Phase 7's
+  `astream_events`), and the right stream mode differs for parent vs. inner
+  steps.
+- **Retries and fallbacks:** a failed model call inside an agent currently fails
+  the run. Only the Supervisor has a fallback (the fixed policy).
+- **Blocking I/O:** arXiv lookups and embeddings are synchronous. `langgraph dev`
+  needs `--allow-blocking`, and a deployment would want async tools.
+- **`run_policy` validation:** a resumed thread trusts whatever policy it stored.
+  A policy written by an older build with different keys is passed straight to
+  `build_multi_agent_graph`.
+
+### Where each Phase 6 concept lives
 
 | Concept | File |
 | --- | --- |
 | Why one `draft` field breaks with several agents | `multi_agent_state.py` (module docstring) |
-| One field, one owner, and how it is enforced | `multi_agent_state.py` → `OWNERS`, `owns` |
-| The turn boundary as the one non-owner writer | `multi_agent_state.py`; `multi_agent_graph.py` → `multi_agent_turn_input` |
-| `input_schema` / `output_schema` as an agent's contract | `multi_agent_state.py` → `ResearcherInput`, `ResearcherOutput` |
-| An agent as a subgraph | `agents/researcher.py` (module docstring) |
-| The private message channel, and its limit (disk) | `agents/researcher.py`; `tests/test_multi_agent.py` |
-| Why the Writer is a node, not a subgraph | `agents/writer.py` (module docstring) |
-| An agent must always hand something over | `agents/researcher.py` → `compile_notes` |
-| Telling the Writer "nothing was found" explicitly | `agents/writer.py` → `NO_NOTES` |
-| Which stream modes see inside a subgraph | `cli.py` → `cmd_multi_agent` |
-| Per-invocation vs. per-revision agent budgets (for 6.3) | `multi_agent_graph.py` (bottom note) |
-| Why routing is a model's judgement now | `agents/supervisor.py` (module docstring) |
-| Structured output, `json_schema` vs `function_calling` | `agents/supervisor.py` (module docstring), `make_supervisor` |
-| Rationale-before-route field order | `agents/supervisor.py` → `SupervisorDecision` |
+| One field, one owner; `owns`; budget-entry ownership | `multi_agent_state.py` → `OWNERS`, `BUDGET_ENTRY_OWNERS`, `owns` |
+| The turn boundary as a node | `multi_agent_graph.py` → `begin_turn`, `per_turn_reset`, `multi_agent_turn_input` |
+| `input_schema` / `output_schema` as an agent's contract | `multi_agent_state.py` → `ResearcherInput/Output`, `CriticInput/Output` |
+| An agent as a subgraph; private channels and their limits | `agents/researcher.py`, `agents/critic.py` (module docstrings) |
+| Why the Writer is a node | `agents/writer.py` (module docstring) |
+| An agent must always hand something over | `agents/researcher.py` → `compile_notes`; `agents/critic.py` → `compile_verdict` |
+| Briefs and merge-on-rerun | `agents/researcher.py` (6.2 docstring), `_merge`, `retrieve` |
+| Checking a citation; ERROR is not NOT FOUND | `tools/citations.py`; `tests/test_citations.py` |
+| Why routing is a model's judgement; structured output | `agents/supervisor.py` (module docstring), `SupervisorDecision` |
 | What the Supervisor sees | `agents/supervisor.py` → `render_supervisor_view` |
-| Code guards overruling the model; the termination bound | `agents/supervisor.py` → `apply_guards`; `tests/test_supervisor.py` |
-| Falling back to the known-good hand-off | `agents/supervisor.py` → `fixed_policy` |
-| Stale draft, answered from the decision log | `agents/supervisor.py` → `draft_is_current` |
-| Decision in a node, edge in a routing function (vs `Command`) | `multi_agent_graph.py` → `route_from_supervisor` |
-| Hub-and-spoke vs agents routing each other | `multi_agent_graph.py` (6.2 docstring) |
+| Guards, roster, fallback, termination bound | `agents/supervisor.py` → `apply_guards`, `fixed_policy`; `tests/test_supervisor.py` |
+| Staleness (draft, rejection, critique) | `agents/supervisor.py` → `draft_is_current`, `draft_was_rejected`, `critique_is_current` |
+| Decision in a node, edge in a routing function | `multi_agent_graph.py` → `route_from_supervisor` |
+| Rejections through the Supervisor; the cap overrules the verdict | `multi_agent_graph.py` → `after_critique`, `after_review`, `start_revision` |
+| Budget TypedDict, reducer, safe access | `multi_agent_state.py` → `AgentBudget`, `merge_budgets`, `budget_of` |
+| Counter scopes | `multi_agent_state.py` → `dispatches`; `multi_agent_graph.py` (bottom) |
 | Why the decision log does not use `operator.add` | `multi_agent_state.py` → `supervisor_log` |
-| Briefs and merge-on-rerun | `agents/researcher.py` (6.2 docstring), `compile_notes`, `retrieve` |
-| The Critic as a subgraph with a private channel | `agents/critic.py` (module docstring); `tests/test_critic_agent.py` (written first) |
-| Checking a citation instead of doubting it | `tools/citations.py` |
-| A failed lookup is not a missing paper | `tools/citations.py`; `tests/test_citations.py` |
-| Rejections classified by the Supervisor | `agents/supervisor.py` (6.3 docstring); `multi_agent_graph.py` → `after_critique` |
-| Staleness, second case (critiques) | `agents/supervisor.py` → `critique_is_current`, `draft_was_rejected` |
-| The roster guard, and logging a proposal instead of forbidding it | `agents/supervisor.py` (6.3 docstring), `apply_guards` |
-| Per-agent budget TypedDict and its reducer | `multi_agent_state.py` → `AgentBudget`, `merge_budgets`, `budget_of` |
-| Ownership one level down (budget entries) | `multi_agent_state.py` → `BUDGET_ENTRY_OWNERS`, `owns` |
-| Scope of `dispatches` vs `budgets` vs `revisions` | `multi_agent_state.py` → `dispatches`; `multi_agent_graph.py` (bottom) |
-| The third reset site | `multi_agent_graph.py` → `start_revision` |
 | A human edit as its own field | `multi_agent_state.py` → `human_edit` |
-| Reducer keys read back as empty, not missing | `tests/test_revisions_and_budgets.py` → pre-6.3 migration test |
+| Stored run policy vs. repeated flags | `multi_agent_state.py` → `run_policy`; `cli.py` → `cmd_multi_review` |
+| `get_state()` is schema-filtered; raw channels | `cli.py` → `_raw_channels` |
+| Stream modes and subgraph visibility | `cli.py` → `_stream_multi_agent` |
+| Pruning a small-but-unbounded transcript | `pruning.py`; `multi_agent_graph.py` (prune note) |
+| The offline Studio demo | `studio_demo.py` |

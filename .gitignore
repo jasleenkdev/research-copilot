@@ -15,3 +15,6 @@ data/
 *.db
 
 .DS_Store
+
+# LangGraph dev server (langgraph dev) local state
+.langgraph_api/

@@ -45,9 +45,9 @@ does not depend on which agent happened to run last.
 --------------------------------------------------------------------------
 CONCEPT: the one exception - the turn boundary
 --------------------------------------------------------------------------
-`multi_agent_turn_input` (in multi_agent_graph.py) writes almost every key at
-once: it clears last turn's notes, draft, and plan. That does not break the
-rule. It is the rule's lifecycle. Ownership is *within* a turn. Between turns,
+The `begin_turn` node (in multi_agent_graph.py; until 6.4 this was the
+`multi_agent_turn_input` helper) writes almost every key at once: it clears
+last turn's notes, draft, and plan. That does not break the rule. It is the rule's lifecycle. Ownership is *within* a turn. Between turns,
 the key's previous value is stale and the turn boundary resets it, exactly as
 `turn_input` has reset `iterations` since Phase 4. So the Writer never clears
 the Researcher's notes. The next turn does.
@@ -255,18 +255,53 @@ class MultiAgentState(TypedDict, total=False):
     # state.py.
     question: str
     mode: Mode
-    # Phase 4's compressed history. Nothing in 6.1 writes it yet (there is no
-    # prune_history in this graph - see the build notes in
-    # multi_agent_graph.py), but the Writer already reads it. That way a
-    # checkpointed thread that does have a summary is answered correctly.
-    summary: str
 
-    # --- the shared transcript (owner: finalize_answer) -------------------------
+    # 6.4. The build configuration this turn is running under - the kwargs
+    # `build_multi_agent_graph` was called with (critic on/off, approval,
+    # max_revisions, caps, budgets, memory policy). Written by the turn
+    # boundary, read by whoever resumes the thread.
+    #
+    # CONCEPT (6.4): configuration a resume must repeat, stored instead of
+    # repeated
+    # Phase 5's `review` command learned that a routing function reading a
+    # closure makes that closure's value configuration every process touching
+    # the thread must repeat: `revisions` is checkpointed, `max_revisions` is
+    # not. Its answer was to make the caller repeat the flags, and its note said
+    # to carry the rule into Phase 6. Phase 6 has far more of that
+    # configuration - roster, three budgets, per-turn caps, approval, memory
+    # policy - and "remember to pass the same eight flags to `multi-review`"
+    # is not a rule anyone follows. So the policy is written into the turn's
+    # state, and `multi-review` rebuilds the graph from it. A resume cannot
+    # run under a different policy from the pause, because it is not told the
+    # policy - it reads it.
+    #
+    # Not the thread_id, and that distinction still holds (checkpointing.py):
+    # the thread_id says *which* conversation; the policy says *how this turn
+    # is being run*, which is part of the turn's content. A new turn on the same
+    # thread may use a different policy - `multi-agent --thread X --critic`
+    # after a turn without - and the turn boundary overwrites it.
+    run_policy: dict
+
+    # --- the shared transcript and its summary ---------------------------------
     # Only human turns and committed answers. The Researcher's tool calls and
     # tool results are NOT here. They live in the Researcher's private
     # `research_messages` channel, which never crosses the subgraph boundary.
     # See agents/researcher.py for why that matters to every agent downstream.
+    #
+    # Two writers, and the one place the ownership rule bends on purpose (6.4):
+    #   finalize_answer   APPENDS the turn's answer - the only writer inside a
+    #                     turn
+    #   prune_history     REMOVES old turns (RemoveMessage) and rewrites
+    #                     `summary`, at the start of the turn, before any agent
+    #                     runs
+    # prune_history is part of the turn boundary in everything but form: it runs
+    # once, first, and never while an agent is working. The two never write in
+    # the same stretch of a turn, which is what the rule actually protects.
     messages: Annotated[list[BaseMessage], add_messages]
+    # Phase 4's compressed history: what prune_history folded away under the
+    # "summarize" strategy. Read by the Researcher and the Writer. Survives the
+    # turn boundary, like `messages`.
+    summary: str
 
     # --- the plan (owner: plan_question) ----------------------------------------
     # Phase 5's advisory sub-questions, unchanged. Read by the Researcher (it
@@ -497,10 +532,17 @@ class CriticOutput(TypedDict, total=False):
 # to answer "who is allowed to write this key?", and `owns` below checks the
 # plain nodes against it on every call.
 #
-# There is no entry for the turn boundary because `multi_agent_turn_input` is
-# the graph's *input*, not a node. It is merged in before any node runs. See
-# "the one exception" at the top of this file.
+# Through 6.3 there was no entry for the turn boundary, because the reset was
+# the graph's *input*, merged in before any node ran. Since 6.4 it is a node,
+# `begin_turn`, and has an entry like everything else.
 OWNERS: dict[str, frozenset[str]] = {
+    # 6.4: the turn boundary, as a node. It writes every per-turn field and is
+    # the documented exception to single ownership - "the one exception"
+    # at the top of this file, now enforced by the graph instead of by
+    # convention. Filled in by multi_agent_graph.py (it owns the reset list).
+    "begin_turn": frozenset(),
+    # 6.4: the pruning step - see the note on `messages` above.
+    "prune_history": frozenset({"messages", "summary"}),
     "plan_question": frozenset({"sub_questions"}),
     # Must match ResearcherOutput exactly. tests/test_multi_agent.py checks it.
     "researcher": frozenset(ResearcherOutput.__annotations__),
@@ -528,6 +570,13 @@ BUDGET_ENTRY_OWNERS: dict[str, frozenset[str]] = {
     "critic": frozenset({"critic"}),
     "start_revision": frozenset(AGENTS),
 }
+
+
+def _register_turn_boundary(fields) -> None:
+    """Called once by multi_agent_graph.py with `per_turn_reset()`'s keys, so the
+    reset list is written in one place and the ownership table follows it."""
+    OWNERS["begin_turn"] = frozenset(fields)
+    BUDGET_ENTRY_OWNERS["begin_turn"] = frozenset(AGENTS)
 
 
 class OwnershipError(RuntimeError):

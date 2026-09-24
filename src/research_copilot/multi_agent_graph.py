@@ -131,7 +131,14 @@ from research_copilot.agents.writer import DEFAULT_MAX_WRITER_CALLS, make_writer
 # call that runs before any agent does.
 from research_copilot.graph import DEFAULT_MAX_SUB_QUESTIONS, _parse_plan, _parse_verdict
 from research_copilot.models import get_chat_model
-from research_copilot.multi_agent_state import AGENTS, MultiAgentState, owns
+from research_copilot.config import get_settings
+from research_copilot.multi_agent_state import (
+    AGENTS,
+    MultiAgentState,
+    _register_turn_boundary,
+    owns,
+)
+from research_copilot.pruning import make_prune_history
 from research_copilot.prompts import PLAN_PROMPT
 from research_copilot.state import Mode
 
@@ -167,6 +174,10 @@ def build_multi_agent_graph(
     max_revisions: int = DEFAULT_MAX_REVISIONS,
     max_critic_iterations: int = DEFAULT_MAX_CRITIC_ITERATIONS,
     max_writer_calls: int = DEFAULT_MAX_WRITER_CALLS,
+    # --- 6.4 ---
+    memory_strategy: str | None = None,
+    max_history_tokens: int | None = None,
+    summary_model: BaseChatModel | None = None,
 ) -> Runnable:
     """Wire up and compile the multi-agent graph.
 
@@ -222,6 +233,32 @@ def build_multi_agent_graph(
         )
 
     # ------------------------------------------------------------------- nodes
+
+    # 6.4: Phase 4's pruning node (pruning.py), at the entry of the turn.
+    #
+    # CONCEPT: small by construction is not bounded
+    # This graph's shared transcript grows much more slowly than Phase 4's. The
+    # Researcher's searches and the Critic's verifications live in private
+    # channels, so every turn adds exactly two messages - the question and the
+    # answer - however much work happened in between. Phase 4 was pruning a
+    # transcript that grew by the tool loop's length every turn.
+    #
+    # Slower is still unbounded. Turn 200 of a long-lived thread resends turns
+    # 1-199 to the Researcher (which reads `messages` for context) and to the
+    # Writer, on every model call they make. So pruning is not optional here;
+    # the pressure is lower, which only changes *when* it bites.
+    #
+    # Where it sits matters for the same reason as Phase 4, plus one new one:
+    # at the entry, it runs before any subgraph is dispatched, so it can never
+    # interact with an in-flight Researcher or Critic. And a resumed run
+    # (multi-review) re-enters at the parked node, not at START, so resuming
+    # never prunes mid-turn either.
+    settings = get_settings()
+    prune_history = make_prune_history(
+        strategy=memory_strategy or settings.memory_strategy,
+        budget=settings.max_history_tokens if max_history_tokens is None else max_history_tokens,
+        summarizer=lambda: summary_model or model or get_chat_model(max_tokens=1024),
+    )
 
     _planner: dict[str, BaseChatModel] = {}
 
@@ -434,6 +471,12 @@ def build_multi_agent_graph(
     #     can only expand a compiled graph that *is* the node. A subgraph called
     #     from inside a node function still streams its steps with
     #     `stream(subgraphs=True)`, but it is drawn as one opaque box.
+    def begin_turn(state: MultiAgentState) -> dict:
+        """The turn boundary, as a node (6.4). See `multi_agent_turn_input`."""
+        return per_turn_reset()
+
+    builder.add_node("begin_turn", owns("begin_turn")(begin_turn))
+    builder.add_node("prune_history", owns("prune_history")(prune_history))
     builder.add_node("plan_question", owns("plan_question")(plan_question))
     builder.add_node("researcher", researcher)
     builder.add_node("writer", owns("writer")(write_draft))
@@ -452,7 +495,11 @@ def build_multi_agent_graph(
     # 6.2: the hub. 6.1's fixed edges researcher -> writer -> finalize_answer
     # are gone. Every agent returns to the Supervisor, and the Supervisor's
     # decision picks the next edge.
-    builder.add_edge(START, "plan_question")
+    # 6.4: the turn boundary first (every caller gets the reset), then
+    # pruning, exactly where Phase 4 put it.
+    builder.add_edge(START, "begin_turn")
+    builder.add_edge("begin_turn", "prune_history")
+    builder.add_edge("prune_history", "plan_question")
     builder.add_edge("plan_question", "supervisor")
     builder.add_conditional_edges(
         "supervisor",
@@ -495,48 +542,61 @@ def build_multi_agent_graph(
     return builder.compile(checkpointer=checkpointer, name="research-copilot-multi-agent")
 
 
-def multi_agent_turn_input(question: str, mode: Mode = "live-search") -> dict:
-    """The state update that starts one turn - `turn_input`'s multi-agent twin.
+# 6.4: the build arguments that define how a turn runs - the part of
+# `build_multi_agent_graph`'s signature that is *policy* rather than
+# injection (models, tools, retriever, checkpointer are injection, and are
+# rebuilt fresh by whoever resumes). Everything here is plain JSON, so it
+# checkpoints like any other state.
+POLICY_KEYS = (
+    "routing",
+    "enable_critic",
+    "require_approval",
+    "max_revisions",
+    "dispatch_caps",
+    "max_research_iterations",
+    "max_critic_iterations",
+    "max_writer_calls",
+    "enable_planning",
+    "max_sub_questions",
+    "memory_strategy",
+    "max_history_tokens",
+)
+
+
+def run_policy(**kwargs) -> dict:
+    """The policy subset of build kwargs, with unset values dropped, so that a
+    rebuild with `build_multi_agent_graph(**policy)` lands on the same defaults."""
+    unknown = set(kwargs) - set(POLICY_KEYS)
+    if unknown:
+        raise TypeError(f"not policy keys: {sorted(unknown)}")
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
+def per_turn_reset() -> dict:
+    """Every per-turn field, at its start-of-turn value. Written by `begin_turn`.
 
     CONCEPT: the turn boundary is the one writer that is not an owner.
     Every agent-owned key is reset here, and that is the ownership rule's
     lifecycle, not an exception to it (see multi_agent_state.py). Within a turn,
     only the Researcher writes `research_notes`. Between turns, last turn's
-    notes are stale, and nobody should read them as current. The Writer
-    especially must not, because it would cite the previous question's sources.
+    notes are stale, and nobody should read them as current - the Writer
+    especially, because it would cite the previous question's sources.
 
-    Resetting here rather than having each agent clear its own field at the
-    start of its run is the same choice Phase 4 made for `iterations`. A reset
-    that depends on the owner running can be skipped, because in 6.2 the
-    Supervisor may not route to an agent at all on a given turn. A reset at the
-    boundary cannot be skipped.
+    `budgets` goes through merge_budgets, so a reset has to name each agent: `{}`
+    would merge as "change nothing". `supervisor_log` can be reset with `[]`
+    only because it does not use an accumulating reducer.
     """
     return {
-        "question": question,
-        "mode": mode,
-        "messages": [HumanMessage(content=question)],
         "sub_questions": [],
         "research_notes": "",
         "documents": [],
         "research_iterations": 0,
-        "draft": "",
-        # --- 6.2 ---
-        # All Supervisor-owned, and all per turn. `dispatches` especially: a
-        # per-turn budget that is never reset is a budget that only ever runs
-        # out (state.py, Phase 5). `supervisor_log` can be reset like this only
-        # because it does not use an accumulating reducer - see its
-        # declaration.
         "research_outcome": "",
+        "draft": "",
         "researcher_brief": "",
         "next_agent": "",
         "dispatches": {},
         "supervisor_log": [],
-        # --- 6.3 ---
-        # The reviewers' fields, the revision count, and every agent's round
-        # budget. `budgets` goes through merge_budgets, so a reset has to name
-        # each agent. `{}` would merge as "change nothing" and leave last
-        # turn's spend in place. The same trap as an accumulating log, and the
-        # reason this list is explicit.
         "critique": "",
         "verdict": "",
         "citation_checks": [],
@@ -545,6 +605,42 @@ def multi_agent_turn_input(question: str, mode: Mode = "live-search") -> dict:
         "human_edit": "",
         "revisions": 0,
         "budgets": {agent: {"used": 0} for agent in AGENTS},
+    }
+
+
+_register_turn_boundary(per_turn_reset())
+
+
+def multi_agent_turn_input(
+    question: str, mode: Mode = "live-search", *, policy: dict | None = None
+) -> dict:
+    """The input that starts one turn: the request, and nothing else.
+
+    CONCEPT (6.4): the reset moved from the input into the graph
+    Through 6.3, this function also reset every per-turn field - Phase 4's
+    `turn_input` pattern. Studio exposed the flaw: Studio (and Phase 7's API)
+    does not call this function. It sends `{"question": ..., "messages": [...]}`
+    and nothing more. On a second turn in the same Studio thread, the dispatch
+    counts, revision count and decision log carried straight over from the
+    first turn. The Critic started turn 2 already at its per-turn cap, and the
+    Supervisor's guards were enforcing turn 1's budget against turn 2's work.
+
+    A reset that lives in a helper only works for callers who know to use the
+    helper. So the reset is now the graph's first node, `begin_turn`, and it
+    runs for every caller. It is safe to run unconditionally, because START is
+    only ever entered by a new turn: a resume (`Command(resume=...)`) re-enters
+    at the parked node, and `update_state` runs no nodes at all.
+
+    What stays here is what only the caller can supply: the question, the mode,
+    the user's message, and the policy the caller built the graph with.
+    """
+    return {
+        "question": question,
+        "mode": mode,
+        # 6.4. Pass the same dict to build_multi_agent_graph(**policy); see
+        # `run_policy` in multi_agent_state.py for why it is stored at all.
+        "run_policy": dict(policy or {}),
+        "messages": [HumanMessage(content=question)],
     }
 
 
