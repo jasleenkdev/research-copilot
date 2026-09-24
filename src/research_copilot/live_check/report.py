@@ -15,7 +15,8 @@ Three rules it enforces:
 
 from collections import defaultdict
 
-from research_copilot.live_check.scenarios import ANTHROPIC_ONLY_ITEMS, SCENARIOS
+from research_copilot.live_check.reviews import RATIONALE_CATEGORIES
+from research_copilot.live_check.scenarios import ANTHROPIC_ONLY_ITEMS, SCENARIOS, by_id
 
 ITEM_TITLES = {
     "0": "Provider portability (Phase 1's promise)",
@@ -30,7 +31,17 @@ ITEM_TITLES = {
 }
 
 
-def render(results: dict[str, dict], *, limits: dict | None = None) -> str:
+def _route_outcome(r: dict) -> str:
+    if r.get("status") == "error":
+        return "error"
+    if r["checks"].get("strict"):
+        return "strict"
+    return "lenient" if r["checks"].get("lenient") else "wrong"
+
+
+def render(results: dict[str, dict], *, limits: dict | None = None,
+           reviews: dict[str, dict] | None = None,
+           baseline: dict[str, dict] | None = None) -> str:
     order = [s.id for s in SCENARIOS]
     by_item: dict[str, list[dict]] = defaultdict(list)
     for sid in order:
@@ -74,22 +85,63 @@ def render(results: dict[str, dict], *, limits: dict | None = None) -> str:
             lenient = sum(bool(r["checks"].get("lenient")) for r in usable)
             lines.append(f"strict {strict}/{len(usable)}, lenient {lenient}/{len(usable)}, "
                          f"errors {len(rows) - len(usable)}")
+            if baseline:
+                base = [baseline[r["id"]] for r in usable if r["id"] in baseline and baseline[r["id"]]["status"] != "error"]
+                if base:
+                    lines.append(f"baseline (before this run's changes): strict "
+                                 f"{sum(bool(b['checks'].get('strict')) for b in base)}/{len(base)}, lenient "
+                                 f"{sum(bool(b['checks'].get('lenient')) for b in base)}/{len(base)}")
+                    for r in usable:
+                        b = baseline.get(r["id"])
+                        if b and b.get("observed", {}).get("proposed") != r["observed"].get("proposed"):
+                            lines.append(f"  CHANGED {r['id']}: {b['observed'].get('proposed')} -> {r['observed'].get('proposed')}")
             for r in rows:
                 o = r.get("observed", {})
                 mark = "OK " if r["checks"].get("strict") else ("~  " if r["checks"].get("lenient") else "XX ")
-                lines.append(f"  {mark}{r['id']} {r['title']}: expected {r['expect'].get('preferred')}, "
+                disputed = " [label disputed]" if by_id().get(r["id"]) and by_id()[r["id"]].label_disputed else ""
+                lines.append(f"  {mark}{r['id']} {r['title']}{disputed}: expected {r['expect'].get('preferred')}, "
                              f"proposed {o.get('proposed')}"
                              + (f" -> routed {o.get('routed_to')} ({o.get('override')})" if o.get("override") else "")
                              + (f" - ERROR {r['error']}" if r.get("error") else ""))
             continue
 
         if item == "3":
-            lines.append("Each rationale beside its route. Judge: does the reasoning support the choice?")
+            reviews = reviews or {}
+            if reviews:
+                lines.append("Two axes per decision: ROUTE (scored by code) x RATIONALE (read "
+                             "against the state by a person).")
+                grid: dict[tuple[str, str], list[str]] = defaultdict(list)
+                for r in rows:
+                    category = reviews.get(r["id"], {}).get("category", "unreviewed")
+                    grid[(_route_outcome(r), category)].append(r["id"])
+                by_label: dict[str, list[str]] = defaultdict(list)
+                for (route, category), ids in sorted(grid.items()):
+                    label = {
+                        ("strict", "sound"): "correct",
+                        ("lenient", "sound"): "acceptable route, sound rationale",
+                        ("wrong", "sound"): "misclassified route (rationale consistent)",
+                        ("strict", "wrong_premise"): "WRONG PREMISE, acceptable route",
+                        ("lenient", "wrong_premise"): "WRONG PREMISE, acceptable route",
+                        ("wrong", "wrong_premise"): "WRONG PREMISE, misclassified route",
+                        ("wrong", "ignores_critique"): "misclassified route (ignores the critique)",
+                    }.get((route, category), f"route {route}, rationale {category}")
+                    by_label[label].extend(ids)
+                for label, ids in by_label.items():
+                    lines.append(f"  {label}: {', '.join(ids)}")
+                lines.append("  categories: " + "; ".join(f"{k} = {v}" for k, v in RATIONALE_CATEGORIES.items()))
+            lines.append("")
+            lines.append("Each rationale beside its route, with the facts it must be consistent with:")
             for r in rows:
                 o = r.get("observed", {})
+                scenario = by_id().get(r["id"])
+                review = (reviews or {}).get(r["id"])
                 lines.append(f"  {r['id']} -> {o.get('proposed')}"
                              + (f" (brief: {o.get('brief')})" if o.get("brief") else "")
                              + f"\n      {o.get('rationale', '(none)')}")
+                for fact in (scenario.premise_facts if scenario else ()):
+                    lines.append(f"      fact: {fact}")
+                if review:
+                    lines.append(f"      REVIEW: {review['category']}" + (f" - {review['note']}" if review.get("note") else ""))
             continue
 
         for r in rows:

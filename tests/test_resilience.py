@@ -1,0 +1,149 @@
+"""Phase 7 (Part D, pulled forward): recovering from a model call to a tool that
+does not exist - the failure Groq's gpt-oss-120b produced live in A1.
+
+Offline: a fake model raises the provider's error on cue. What these pin down
+is the recovery shape - one retry with a hint, then a degraded result instead
+of a crash - for both agents with a tool loop.
+"""
+
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.tools import tool
+
+from research_copilot.agents.critic import build_critic
+from research_copilot.agents.researcher import INVALID_TOOL_NOTE, RESEARCHER_SYSTEM_PROMPT, build_researcher
+from research_copilot.agents.supervisor import supervisor_system_prompt
+from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
+
+GROQ_ERROR = (
+    "Error code: 400 - {'error': {'message': \"Tool call validation failed: attempted to call "
+    "tool 'open_file' which was not in request.tools\", 'code': 'tool_use_failed'}}"
+)
+
+
+class ScriptedModel:
+    """Each script item is a reply (AIMessage / str) or an Exception to raise.
+    Records every request, so tests can see the hint arrive."""
+
+    def __init__(self, *script):
+        self.script = list(script)
+        self.requests = []
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def invoke(self, messages, *args, **kwargs):
+        self.requests.append(list(messages))
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item if isinstance(item, AIMessage) else AIMessage(content=item)
+
+
+def search_call(query, call_id):
+    return AIMessage(content="", tool_calls=[{"name": "search_arxiv", "args": {"query": query}, "id": call_id, "type": "tool_call"}])
+
+
+@tool("search_arxiv")
+def search(query: str, max_results: int = 5) -> str:
+    """Stub."""
+    return f"[1] Paper about {query}\n    URL: http://arxiv.org/abs/2309.15217"
+
+
+@tool("verify_citation")
+def verify(arxiv_id: str) -> str:
+    """Stub."""
+    return f"FOUND: {arxiv_id} - a paper"
+
+
+def researcher_input():
+    return {"question": "Q", "mode": "live-search", "messages": [HumanMessage(content="Q")]}
+
+
+# --- the helper ---------------------------------------------------------------------------
+
+
+def test_recognises_the_groq_invalid_tool_error():
+    assert is_invalid_tool_call(RuntimeError(GROQ_ERROR))
+    assert not is_invalid_tool_call(RuntimeError("Error code: 429 - rate limited"))
+
+
+def test_one_retry_with_the_note_after_the_system_messages():
+    model = ScriptedModel(RuntimeError(GROQ_ERROR), "ok")
+    request = [SystemMessage(content="rules"), HumanMessage(content="Q")]
+    result, attempts = invoke_with_recovery(model, request, recoverable=is_invalid_tool_call, note="HINT", where="t")
+    assert (result.text, attempts) == ("ok", 2)
+    retried = model.requests[1]
+    assert [m.type for m in retried] == ["system", "system", "human"]
+    assert retried[1].content == "HINT"
+
+
+def test_two_failures_return_a_failure_instead_of_raising():
+    model = ScriptedModel(RuntimeError(GROQ_ERROR), RuntimeError(GROQ_ERROR))
+    result, attempts = invoke_with_recovery(model, [HumanMessage(content="Q")], recoverable=is_invalid_tool_call, note="n", where="t")
+    assert isinstance(result, ModelCallFailure) and attempts == 2
+    assert "tool_use_failed" in result.error
+
+
+def test_non_recoverable_errors_still_raise():
+    model = ScriptedModel(RuntimeError("GROQ_API_KEY is not set"))
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        invoke_with_recovery(model, [HumanMessage(content="Q")], recoverable=is_invalid_tool_call, note="n", where="t")
+
+
+# --- the Researcher -----------------------------------------------------------------------
+
+
+def test_researcher_recovers_after_one_invented_tool_call():
+    model = ScriptedModel(
+        search_call("ragas", "1"),
+        RuntimeError(GROQ_ERROR),          # tries open_file after the search
+        "- Findings: X (http://arxiv.org/abs/2309.15217)\n- Sources: ...\n- Gaps: none",
+    )
+    out = build_researcher(model=model, tools=[search]).invoke(researcher_input())
+    assert out["research_outcome"] == "findings"
+    assert out["research_notes"].startswith("- Findings")
+    assert out["research_iterations"] == 3  # the failed attempt counts: it spent tokens
+    assert any(m.content == INVALID_TOOL_NOTE for m in model.requests[2])
+
+
+def test_researcher_that_fails_twice_hands_over_raw_results_instead_of_crashing():
+    model = ScriptedModel(search_call("ragas", "1"), RuntimeError(GROQ_ERROR), RuntimeError(GROQ_ERROR))
+    out = build_researcher(model=model, tools=[search]).invoke(researcher_input())
+    assert out["research_outcome"] == "model_error"
+    assert "model failed before it wrote up" in out["research_notes"]
+    assert "Paper about ragas" in out["research_notes"]
+
+
+def test_researcher_prompt_says_search_is_the_only_tool():
+    assert "search_arxiv is your only tool" in RESEARCHER_SYSTEM_PROMPT
+
+
+# --- the Critic ---------------------------------------------------------------------------
+
+
+def critic_input():
+    return {"question": "Q", "draft": "RAGAS [2309.15217]", "research_notes": "notes"}
+
+
+def test_critic_recovers_after_one_invented_tool_call():
+    model = ScriptedModel(RuntimeError(GROQ_ERROR), "APPROVE")
+    out = build_critic(model=model, tools=[verify]).invoke(critic_input())
+    assert out["verdict"] == "approve"
+    assert out["budgets"]["critic"]["used"] == 2
+
+
+def test_critic_that_fails_twice_fails_closed():
+    model = ScriptedModel(RuntimeError(GROQ_ERROR), RuntimeError(GROQ_ERROR))
+    out = build_critic(model=model, tools=[verify]).invoke(critic_input())
+    assert out["verdict"] == "reject"
+    assert "model failed before reaching a verdict" in out["critique"]
+
+
+# --- the Supervisor's premise-checking instruction ------------------------------------------
+
+
+def test_supervisor_prompt_asks_it_to_check_a_critiques_premise():
+    prompt = supervisor_system_prompt(("researcher", "writer", "critic"))
+    assert "A critique can be wrong" in prompt
+    assert "establish whether the thing exists at all" in prompt

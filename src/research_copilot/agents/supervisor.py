@@ -288,6 +288,19 @@ def supervisor_system_prompt(roster: tuple[str, ...]) -> str:
         "- After a rejection, decide whose problem it is: evidence problems go to "
         "the researcher (with a brief naming what to find), writing problems go "
         "to the writer.\n"
+        # Phase 7 A1: added after SUP08/SUP04 on Groq - the Supervisor accepted
+        # a critique's premise (a source is missing; a cited thing exists)
+        # without checking it against the notes it was holding. The rationale
+        # agreed with the route; it was the premise that was wrong.
+        "- A critique can be wrong. Before routing on it, check its factual claims "
+        "against the state shown here: if it says a source is missing, look for "
+        "it in the research notes; if it names a paper or a claim, check the notes "
+        "and the citation checks. Route on what the state shows, not on what the "
+        "critique asserts, and say in your rationale what you checked.\n"
+        "- A citation the checks mark not_found or invalid may mean the thing it "
+        "supports was invented, not just mis-cited. Do not brief the researcher to "
+        "find 'the correct citation' for it; brief it to establish whether the "
+        "thing exists at all.\n"
         "- A follow-up research pass is worth it only if you can say what it "
         "should find. If the last pass found nothing new, another pass with the "
         "same brief will not either.\n"
@@ -342,6 +355,7 @@ def draft_is_current(state: MultiAgentState) -> bool:
     if last_dispatched(state) == "researcher" and state.get("research_outcome") in (
         "findings",
         "budget_exhausted",
+        "model_error",  # Phase 7: may also have appended raw results
     ):
         return False
     return True

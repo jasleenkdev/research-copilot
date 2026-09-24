@@ -1,0 +1,24 @@
+{
+  "_meta": {
+    "run": "groq openai/gpt-oss-120b, day one, Supervisor prompt before the premise-checking instruction",
+    "reviewer": "Claude (read in session), categories confirmed by the user for SUP04/SUP08",
+    "results": "data/live_check/results-groq.jsonl"
+  },
+  "SUP01": {"category": "sound", "note": "Correct evidence reading; brief asks for the specific correlation figure."},
+  "SUP02": {"category": "sound", "note": "True premise (ARES not in notes); chose to research it rather than remove it - the lenient route."},
+  "SUP03": {"category": "sound", "note": ""},
+  "SUP04": {"category": "wrong_premise", "note": "Treats BENCH-RAG as real: brief asks for 'the correct citation' for a framework whose only source does not exist."},
+  "SUP05": {"category": "sound", "note": ""},
+  "SUP06": {"category": "ignores_critique", "note": "Acknowledges the repetition, then routes on the notes' open reliability gap. The gap-vs-critique priority question - left as-is by decision, revisit with more scenarios."},
+  "SUP07": {"category": "sound", "note": ""},
+  "SUP08": {"category": "wrong_premise", "note": "States the reference-free claim 'lacks a supporting citation'; the notes it was shown contain one. Repeated the critic's false claim."},
+  "SUP09": {"category": "sound", "note": "Brief invents a 2022-2024 date range the question did not ask for (minor)."},
+  "SUP10": {"category": "sound", "note": "Routes on a real open gap; the expected label is disputed (see label_disputed)."},
+  "SUP11": {"category": "sound", "note": ""},
+  "SUP12": {"category": "sound", "note": ""},
+  "SUP13": {"category": "sound", "note": "Best decision of the run: cites the spent research budget and chooses to acknowledge the gap."},
+  "SUPC02": {"category": "sound", "note": "Same research-it preference as SUP02, with no gap present - a consistent behaviour, not a confound."},
+  "SUPC06": {"category": "sound", "note": ""},
+  "SUPC08": {"category": "scope_creep", "note": "Correctly overrides the critic by checking the notes, but adds a requirement to cover 'the broader range of evaluation practices'."},
+  "SUPC10": {"category": "sound", "note": ""}
+}

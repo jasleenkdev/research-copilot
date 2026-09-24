@@ -56,6 +56,15 @@ class Scenario:
     # tokens-per-minute limit. A guess, and deliberately on the high side.
     est_tokens: int = 3000
     note: str = ""
+    # Phase 7 A1 (after day one): facts that are TRUE in this scenario's state
+    # and that any sound rationale must be consistent with. This is what lets
+    # a judge catch "wrong premise, acceptable route" (SUP04, SUP08 on day one):
+    # a rationale that agrees with its route but asserts something the state
+    # contradicts. Checking rationale-vs-route alone cannot see that failure.
+    premise_facts: tuple[str, ...] = ()
+    # Set when the expected route itself is questionable, with the reason.
+    # The score is kept for comparability across runs, but the report flags it.
+    label_disputed: str = ""
 
 
 # ----------------------------------------------------------------- shared texts
@@ -187,7 +196,8 @@ SCENARIOS: list[Scenario] = [
                          {"arxiv_id": "2311.09476", "status": "found"}])},
              _route("writer", "researcher"),
              note="The citation is real but unresearched: it is the Writer's error. "
-                  "researcher is defensible (research ARES properly)."),
+                  "researcher is defensible (research ARES properly).",
+             premise_facts=("ARES (2311.09476) does not appear anywhere in the research notes", "ARES exists on arXiv (the citation check says found)")),
     Scenario("SUP03", "2", "supervisor", "Structure: omits covered material, conclusion first",
              {"state": _after_rejection(
                  "Writing problem: the draft never mentions the original RAG paper even "
@@ -203,7 +213,8 @@ SCENARIOS: list[Scenario] = [
                  notes=NOTES + "\n- Findings: BENCH-RAG standardises RAG metrics (BENCH-RAG, http://arxiv.org/abs/2401.99999).",
                  checks=[{"arxiv_id": "2309.15217", "status": "found"},
                          {"arxiv_id": "2401.99999", "status": "not_found"}])},
-             _route("researcher")),
+             _route("researcher"),
+             premise_facts=("BENCH-RAG's only source, 2401.99999, is not_found on arXiv, so BENCH-RAG itself may not exist",)),
     Scenario("SUP05", "2", "supervisor", "Part of the question has no evidence at all",
              {"state": _after_rejection(
                  "Evidence problem: the question asks what these evaluations cost to run. "
@@ -215,7 +226,8 @@ SCENARIOS: list[Scenario] = [
              {"state": _after_rejection(
                  "Writing problem: the answer is three times longer than it needs to be and "
                  "repeats the same point about faithfulness twice.", draft=GOOD_DRAFT * 3)},
-             _route("writer")),
+             _route("writer"),
+             premise_facts=("The critique is about length and repetition only - it names no missing evidence",)),
     Scenario("SUP07", "2", "supervisor", "Speculation presented as fact",
              {"state": _after_rejection(
                  "Writing problem: the draft states that RAGAS will replace human "
@@ -228,7 +240,8 @@ SCENARIOS: list[Scenario] = [
                  "Evidence problem: nothing supports the claim that RAGAS is reference-free.",
                  draft=GOOD_DRAFT.replace(" [http://arxiv.org/abs/2309.15217]", ""))},
              _route("writer", "researcher"),
-             note="The notes already support it - the draft just dropped the citation."),
+             note="The notes already support it - the draft just dropped the citation.",
+             premise_facts=("The research notes DO contain a source for RAGAS being reference-free (2309.15217); the critique is wrong that nothing supports it",)),
     Scenario("SUP09", "2", "supervisor", "First decision of a turn",
              {"state": {"question": QUESTION, "mode": "live-search", "dispatches": {},
                         "supervisor_log": []}},
@@ -237,7 +250,8 @@ SCENARIOS: list[Scenario] = [
              {"state": {"question": QUESTION, "mode": "live-search", "research_notes": NOTES,
                         "research_outcome": "findings", "dispatches": {"researcher": 1},
                         "supervisor_log": _log("researcher")}},
-             _route("writer")),
+             _route("writer"),
+             label_disputed="The notes list an open gap on half the question (reliability), so another research pass is defensible; SUPC10 is the unambiguous version"),
     Scenario("SUP11", "2", "supervisor", "Human rejection: too technical",
              {"state": {**_after_rejection("(approved by the critic)", draft=GOOD_DRAFT),
                         "verdict": "approve", "human_verdict": "reject",
@@ -261,7 +275,8 @@ SCENARIOS: list[Scenario] = [
              _route("writer"),
              note="The brief was tried and found nothing; writing the gap down is the "
                   "right move. A researcher proposal is the 'same brief after "
-                  "nothing_found' failure (the dispatch-cap guard would also refuse it)."),
+                  "nothing_found' failure (the dispatch-cap guard would also refuse it).",
+             premise_facts=("A research pass on this gap already ran with a brief and found nothing", "The researcher's dispatch cap for this turn is spent")),
 
     # --- 2 (controls): the same situations with no open gap -------------------
     # Added after the first Groq run, where every wrong route cited the notes'
@@ -276,19 +291,22 @@ SCENARIOS: list[Scenario] = [
                  notes=CLEAN_NOTES, question=CONTROL_QUESTION,
                  checks=[{"arxiv_id": "2309.15217", "status": "found"},
                          {"arxiv_id": "2311.09476", "status": "found"}])},
-             _route("writer", "researcher"), note="control: added after the first run"),
+             _route("writer", "researcher"), note="control: added after the first run",
+             premise_facts=("ARES (2311.09476) does not appear anywhere in the research notes", "ARES exists on arXiv (the citation check says found)")),
     Scenario("SUPC06", "2", "supervisor", "CONTROL of SUP06: pure style, no open gap",
              {"state": _after_rejection(
                  "Writing problem: the answer is three times longer than it needs to be and "
                  "repeats the same point about faithfulness twice.",
                  draft=CLEAN_DRAFT * 3, notes=CLEAN_NOTES, question=CONTROL_QUESTION)},
-             _route("writer"), note="control: added after the first run"),
+             _route("writer"), note="control: added after the first run",
+             premise_facts=("The critique is about length and repetition only - it names no missing evidence",)),
     Scenario("SUPC08", "2", "supervisor", "CONTROL of SUP08: critic wrong about a source, no open gap",
              {"state": _after_rejection(
                  "Evidence problem: nothing supports the claim that RAGAS is reference-free.",
                  draft=CLEAN_DRAFT.replace(" [http://arxiv.org/abs/2309.15217]", ""),
                  notes=CLEAN_NOTES, question=CONTROL_QUESTION)},
-             _route("writer", "researcher"), note="control: added after the first run"),
+             _route("writer", "researcher"), note="control: added after the first run",
+             premise_facts=("The research notes DO contain a source for RAGAS being reference-free (2309.15217); the critique is wrong that nothing supports it",)),
     Scenario("SUPC10", "2", "supervisor", "CONTROL of SUP10: notes complete, no draft yet",
              {"state": {"question": CONTROL_QUESTION, "mode": "live-search",
                         "research_notes": CLEAN_NOTES, "research_outcome": "findings",
@@ -359,3 +377,28 @@ SCENARIOS: list[Scenario] = [
 
 def by_id() -> dict[str, Scenario]:
     return {s.id: s for s in SCENARIOS}
+
+
+def to_dataset_example(s: Scenario) -> dict:
+    """One scenario as a dataset example: (inputs, reference outputs, metadata).
+
+    The shape Part E uploads to LangSmith. Written now so that day one's
+    distinction survives into it: a Supervisor example carries BOTH the route
+    reference (preferred / acceptable) AND the `premise_facts` a rationale
+    must be consistent with. Those are two separate judgements, and a
+    dataset with only the first cannot express "wrong premise, acceptable
+    route".
+    """
+    outputs = dict(s.expect)
+    if s.kind == "supervisor":
+        outputs = {
+            "preferred_route": s.expect["preferred"],
+            "acceptable_routes": s.expect["acceptable"],
+            "premise_facts": list(s.premise_facts),
+        }
+    return {
+        "inputs": {"kind": s.kind, **s.inputs},
+        "outputs": outputs,
+        "metadata": {"id": s.id, "item": s.item, "title": s.title, "note": s.note,
+                     "label_disputed": s.label_disputed},
+    }

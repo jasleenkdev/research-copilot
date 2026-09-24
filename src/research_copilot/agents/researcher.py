@@ -144,6 +144,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from research_copilot.agent_loop import _execute_tool_call
+from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
 from research_copilot.models import get_chat_model
 from research_copilot.multi_agent_state import ResearcherInput, ResearcherOutput, budget_of
 from research_copilot.retrieval import format_docs, get_retriever
@@ -188,7 +189,18 @@ RESEARCHER_SYSTEM_PROMPT = (
     "copied from the search results. Never invent or reconstruct a URL.\n"
     "- Gaps: anything the question asks that you could not find evidence for.\n\n"
     "Write notes, not an answer: no introduction, no conclusion, no advice to "
-    "the reader."
+    "the reader.\n\n"
+    # Phase 7: added after gpt-oss-120b (Groq) called a browsing tool it does
+    # not have. Harmless on any model, and true of this agent everywhere.
+    "search_arxiv is your only tool. You cannot open URLs, files, or web "
+    "pages - the search results are all you get, so write your notes from them."
+)
+
+# Phase 7: the hint for the one retry after a call to a tool that does not exist.
+INVALID_TOOL_NOTE = (
+    "Your previous reply tried to call a tool that does not exist. The only tool "
+    "you have is search_arxiv. Either call search_arxiv, or stop and write your "
+    "notes from the results you already have."
 )
 
 # 6.2: shown on a pass that has a brief, or that follows an earlier pass. On a
@@ -381,11 +393,21 @@ def build_researcher(
             *state.get("messages", []),
             *state.get("research_messages", []),
         ]
-        ai_message = researcher_model().invoke(request)
-        return {
-            "research_messages": [ai_message],
-            "research_iterations": state.get("research_iterations", 0) + 1,
-        }
+        # Phase 7: a call to a nonexistent tool is retried once with a hint
+        # (resilience.py). A failed attempt still spent tokens, so every
+        # attempt counts against the round budget.
+        result, attempts = invoke_with_recovery(
+            researcher_model(), request,
+            recoverable=is_invalid_tool_call, note=INVALID_TOOL_NOTE, where="researcher",
+        )
+        iterations = state.get("research_iterations", 0) + attempts
+        if isinstance(result, ModelCallFailure):
+            # Degrade, don't crash: end the loop here. The marker message has
+            # no tool calls, so should_search routes to compile_notes, which
+            # hands over whatever results came back (outcome model_error).
+            marker = AIMessage(content="", additional_kwargs={"model_error": result.error})
+            return {"research_messages": [marker], "research_iterations": iterations}
+        return {"research_messages": [result], "research_iterations": iterations}
 
     def research_tools(state: ResearcherState) -> dict:
         """Run the tools the last research step asked for. Phase 3's `call_tool`,
@@ -432,6 +454,20 @@ def build_researcher(
         # Only this invocation's messages are here: the private channel starts
         # empty on every call. So "results" means this pass's results.
         last = messages[-1] if messages else None
+
+        if isinstance(last, AIMessage) and last.additional_kwargs.get("model_error"):
+            # Phase 7: the model's calls failed even after a retry. Keep the
+            # evidence gathered before that, raw, as for an exhausted budget.
+            results = [
+                m.text.strip() for m in messages if isinstance(m, ToolMessage) and m.text.strip()
+            ]
+            if not results:
+                return {"research_notes": previous, "research_outcome": "model_error"}
+            raw = (
+                "(The Researcher's model failed before it wrote up its findings. "
+                "Raw search results follow, unfiltered.)\n\n" + "\n\n".join(results)
+            )
+            return {"research_notes": _merge(previous, raw, brief), "research_outcome": "model_error"}
 
         if isinstance(last, AIMessage) and not last.tool_calls and last.text.strip():
             new = last.text.strip()

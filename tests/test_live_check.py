@@ -370,3 +370,70 @@ def test_rescore_updates_recorded_writer_results_without_a_model(tmp_path):
     latest = runner.load_results(path)["WRT02"]
     assert latest["status"] == "pass" and latest["rescored"] is True
     assert latest["previous_checks"]["admits_gap"] is False
+
+
+# --- the two axes: route and rationale -------------------------------------------------
+
+
+def test_premise_facts_mark_the_day_one_wrong_premise_scenarios():
+    assert by_id()["SUP08"].premise_facts and by_id()["SUP04"].premise_facts
+    assert "DO contain" in by_id()["SUP08"].premise_facts[0]
+
+
+def test_dataset_example_keeps_route_and_premise_as_separate_references():
+    example = sc.to_dataset_example(by_id()["SUP08"])
+    assert example["outputs"]["preferred_route"] == "writer"
+    assert example["outputs"]["acceptable_routes"] == ["researcher", "writer"]
+    assert example["outputs"]["premise_facts"] == list(by_id()["SUP08"].premise_facts)
+    assert example["metadata"]["item"] == "2"
+
+
+def test_every_scenario_exports_as_a_dataset_example():
+    for s in SCENARIOS:
+        example = sc.to_dataset_example(s)
+        assert set(example) == {"inputs", "outputs", "metadata"}
+
+
+def test_day_one_reviews_file_is_valid_and_complete():
+    from pathlib import Path
+
+    from research_copilot.live_check.reviews import load_reviews
+
+    reviews = load_reviews(Path("docs/live_check/reviews-groq-gpt-oss-120b-day1.json"))
+    supervisor_ids = {s.id for s in SCENARIOS if s.kind == "supervisor"}
+    assert set(reviews) == supervisor_ids
+    assert reviews["SUP08"]["category"] == reviews["SUP04"]["category"] == "wrong_premise"
+
+
+def test_unknown_review_category_is_rejected(tmp_path):
+    from research_copilot.live_check.reviews import load_reviews
+
+    bad = tmp_path / "r.json"
+    bad.write_text('{"SUP01": {"category": "vibes", "note": ""}}')
+    with pytest.raises(ValueError, match="vibes"):
+        load_reviews(bad)
+
+
+def test_report_separates_wrong_premise_from_misclassified(tmp_path):
+    cfg, _, _ = cfg_with(tmp_path, decisions=[
+        SupervisorDecision(rationale="lacks a citation", next="researcher", researcher_brief="b"),  # SUP08: lenient
+        SupervisorDecision(rationale="gap", next="researcher", researcher_brief="b"),               # SUP06: wrong
+    ])
+    results = runner.run(cfg, [by_id()["SUP08"], by_id()["SUP06"]], log=quiet)
+    text = report.render(results, reviews={
+        "SUP08": {"category": "wrong_premise", "note": ""},
+        "SUP06": {"category": "ignores_critique", "note": ""},
+    })
+    assert "WRONG PREMISE, acceptable route: SUP08" in text
+    assert "misclassified route (ignores the critique): SUP06" in text
+    assert "fact: The research notes DO contain" in text
+
+
+def test_report_compares_item_2_against_a_baseline(tmp_path):
+    cfg, _, _ = cfg_with(tmp_path, decisions=[SupervisorDecision(rationale="r", next="writer")])
+    current = runner.run(cfg, [by_id()["SUP06"]], log=quiet)
+    baseline = {"SUP06": {**current["SUP06"], "checks": {"strict": False, "lenient": False},
+                          "observed": {**current["SUP06"]["observed"], "proposed": "researcher"}}}
+    text = report.render(current, baseline=baseline)
+    assert "baseline (before this run's changes): strict 0/1" in text
+    assert "CHANGED SUP06: researcher -> writer" in text

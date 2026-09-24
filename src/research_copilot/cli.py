@@ -1292,6 +1292,8 @@ def cmd_live_check(
     daily_token_budget: int | None = 190_000,
     tpm: int = 8_000,
     results: str | None = None,
+    reviews: str | None = None,
+    baseline: str | None = None,
 ) -> None:
     """Run (or report on) the live-verification scenarios. (Phase 7, A)
 
@@ -1330,8 +1332,14 @@ def cmd_live_check(
 
     limits_path = path.with_suffix(".limits.json")
     if action == "report":
+        from research_copilot.live_check.reviews import load_reviews
+
         limits = json.loads(limits_path.read_text()) if limits_path.exists() else None
-        text = live_report.render(runner.load_results(path), limits=limits)
+        text = live_report.render(
+            runner.load_results(path), limits=limits,
+            reviews=load_reviews(Path(reviews)) if reviews else None,
+            baseline=runner.load_results(Path(baseline)) if baseline else None,
+        )
         out = path.with_suffix(".md")
         out.write_text(text)
         print(text)
@@ -1666,6 +1674,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     live_parser.add_argument("--tpm", type=int, default=8_000, help="Tokens-per-minute pacing limit")
     live_parser.add_argument("--results", default=None, help="Results JSONL path")
+    live_parser.add_argument("--reviews", default=None, help="Human rationale reviews JSON (report)")
+    live_parser.add_argument("--baseline", default=None, help="Earlier results JSONL to compare item 2 against (report)")
 
     # --- Phase 6 ---
     multi_review_parser = subparsers.add_parser(
@@ -1854,6 +1864,8 @@ def main(argv: list[str] | None = None) -> int:
                 daily_token_budget=args.daily_token_budget or None,
                 tpm=args.tpm,
                 results=args.results,
+                reviews=args.reviews,
+                baseline=args.baseline,
             )
         elif args.command == "multi-review":
             decision = None

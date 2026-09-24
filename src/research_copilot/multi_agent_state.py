@@ -106,7 +106,10 @@ from research_copilot.state import Mode
 # That is fine for the Writer, a model that reads prose. It is not fine for the
 # Supervisor's *guards*, which are code: "was the budget the problem?" should
 # not be answered by searching a string for "budget ran out".
-ResearchOutcome = Literal["findings", "nothing_found", "budget_exhausted"]
+#   model_error       (Phase 7) the model's calls kept failing - e.g. it called a
+#                     tool it does not have, twice. Whatever results came back
+#                     before that are appended raw, as for budget_exhausted.
+ResearchOutcome = Literal["findings", "nothing_found", "budget_exhausted", "model_error"]
 
 # 6.2. The places the Supervisor can send the run. "finish" is not an agent. It
 # ends the Supervisor's part of the turn: `finalize_answer` commits the draft,

@@ -78,6 +78,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from research_copilot.agent_loop import _execute_tool_call
+from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
 # Phase 5's parsers, imported rather than copied: one definition of what a
 # verdict is, shared by the Phase 5 critic, the Phase 4 human gate, and this
 # agent.
@@ -115,7 +116,21 @@ CRITIC_AGENT_PROMPT = (
     "is badly organised). Name the claim, the citation, or the part of the "
     "question. A note nobody can act on wastes a revision.\n\n"
     "Approve a draft that is good enough. Holding out for perfect costs "
-    "revisions and gets you nothing."
+    "revisions and gets you nothing.\n\n"
+    # Phase 7: the same line the Researcher got, for the same reason.
+    "verify_citation is your only tool. You cannot open URLs, files, or web pages."
+)
+
+# Phase 7: same hint as the Researcher's, for the Critic's one tool.
+INVALID_TOOL_NOTE = (
+    "Your previous reply tried to call a tool that does not exist. The only tool "
+    "you have is verify_citation. Either call it on an arXiv id, or give your "
+    "verdict now."
+)
+
+MODEL_ERROR_CRITIQUE = (
+    "The Critic's model failed before reaching a verdict ({error}). Treated as a "
+    "rejection (fail closed)."
 )
 
 OUT_OF_BUDGET_CRITIQUE = (
@@ -177,11 +192,15 @@ def build_critic(
             ),
             *state.get("critic_messages", []),
         ]
-        ai_message = critic_model_runnable().invoke(request)
-        return {
-            "critic_messages": [ai_message],
-            "critic_iterations": state.get("critic_iterations", 0) + 1,
-        }
+        result, attempts = invoke_with_recovery(
+            critic_model_runnable(), request,
+            recoverable=is_invalid_tool_call, note=INVALID_TOOL_NOTE, where="critic",
+        )
+        iterations = state.get("critic_iterations", 0) + attempts
+        if isinstance(result, ModelCallFailure):
+            marker = AIMessage(content="", additional_kwargs={"model_error": result.error})
+            return {"critic_messages": [marker], "critic_iterations": iterations}
+        return {"critic_messages": [result], "critic_iterations": iterations}
 
     def critic_tools(state: CriticState) -> dict:
         last = state["critic_messages"][-1]
@@ -212,6 +231,16 @@ def build_critic(
         used = spent(state)
         budget = {"critic": {"used": used, "cap": max_iterations}}
         last = messages[-1] if messages else None
+
+        if isinstance(last, AIMessage) and last.additional_kwargs.get("model_error"):
+            # Phase 7: the model failed even after a retry. Fail closed, as for
+            # an exhausted budget: "did not finish" is never "approved".
+            return {
+                "verdict": "reject",
+                "critique": MODEL_ERROR_CRITIQUE.format(error=last.additional_kwargs["model_error"][:300]),
+                "citation_checks": checks,
+                "budgets": budget,
+            }
 
         if last is None or (isinstance(last, AIMessage) and last.tool_calls):
             # Out of budget before a verdict - or never started, because the
