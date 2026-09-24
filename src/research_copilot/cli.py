@@ -50,6 +50,34 @@ decides the route, not what the graph is:
                                       hand-off as a fixed policy
   --max-researcher-runs / --max-writer-runs
                                       per-turn dispatch caps
+
+6.3 adds --critic and --max-revisions to `multi-agent`. The flags share their
+names with Phase 5's, but not all of their meaning. What each has meant, phase
+by phase:
+
+  flag              Phase 4          Phase 5 (graph-agent)      Phase 6.3 (multi-agent)
+  ----------------  ---------------  -------------------------  ---------------------------------
+  --critic          (did not exist)  a critique_draft node      the Critic *agent* joins the
+                                     reviews every draft;       Supervisor's roster; it verifies
+                                     rejection -> call_model    arXiv citations; a rejection goes
+                                     re-drafts                  to the Supervisor, which picks
+                                                                Researcher or Writer to fix it
+  --max-revisions   (did not exist)  rejection rounds per turn  unchanged: rejection rounds per
+                                                                turn, from either reviewer. Also
+                                                                scales the Writer/Critic dispatch
+                                                                caps so every round can be used
+  --approve         human gate       unchanged; after the       graph-level only in 6.3, same
+                    before commit    critic when both on        meaning (after the Supervisor
+                                     (critic first)             finishes, after the Critic when
+                                                                both on). Not yet a flag on
+                                                                `multi-agent`: it needs --thread,
+                                                                --checkpointer and `review`, which
+                                                                arrive together in 6.4
+  --plan            (did not exist)  plan_question before the   unchanged: plan_question before
+                                     mode branch                the Supervisor's first decision
+
+`graph-agent` keeps its Phase 5 meanings for all four. Nothing on that command
+changed.
 """
 
 import argparse
@@ -822,6 +850,19 @@ def _describe_supervisor(update: dict) -> str:
     return line + f"\n      why: {rationale[:160]}" + ("..." if len(rationale) > 160 else "")
 
 
+def _describe_critic(update: dict) -> str:
+    """The Critic's verdict as one line, with the citation checks it ran."""
+    verdict = (update.get("verdict") or "?").upper()
+    critique = " ".join((update.get("critique") or "").split())
+    checks = update.get("citation_checks") or []
+    line = f"{verdict}"
+    if checks:
+        line += "  checks: " + ", ".join(f"{c['arxiv_id']}={c['status']}" for c in checks)
+    if critique:
+        line += f"\n      note: {critique[:160]}" + ("..." if len(critique) > 160 else "")
+    return line
+
+
 def cmd_multi_agent(
     question: str,
     mode: str,
@@ -829,8 +870,10 @@ def cmd_multi_agent(
     max_research_iterations: int,
     plan: bool = False,
     routing: str = "supervisor",
-    max_researcher_runs: int = 2,
-    max_writer_runs: int = 2,
+    max_researcher_runs: int | None = None,
+    max_writer_runs: int | None = None,
+    critic: bool = False,
+    max_revisions: int | None = None,
 ) -> None:
     """One question through Researcher -> Writer, with every hand-off printed.
 
@@ -864,15 +907,23 @@ def cmd_multi_agent(
     if mode == "knowledge-base" and _warn_if_empty_store():
         return
 
+    resolved_revisions = get_settings().max_revisions if max_revisions is None else max_revisions
+    dispatch_caps = {}
+    if max_researcher_runs is not None:
+        dispatch_caps["researcher"] = max_researcher_runs
+    if max_writer_runs is not None:
+        dispatch_caps["writer"] = max_writer_runs
     graph = build_multi_agent_graph(
         max_research_iterations=max_research_iterations,
         enable_planning=plan,
         routing=routing,
-        dispatch_caps={"researcher": max_researcher_runs, "writer": max_writer_runs},
+        dispatch_caps=dispatch_caps,
+        enable_critic=critic,
+        max_revisions=resolved_revisions,
     )
+    roster = "researcher, writer, critic" if critic else "researcher, writer"
     print(
-        f"[routing] {routing}"
-        f"  (caps: researcher {max_researcher_runs}, writer {max_writer_runs})",
+        f"[routing] {routing}  (roster: {roster}; max revisions {resolved_revisions})",
         file=sys.stderr,
     )
 
@@ -901,6 +952,8 @@ def cmd_multi_agent(
             for node, update in payload.items():
                 if node == "supervisor":
                     print(f"  [supervisor] {_describe_supervisor(update or {})}", file=sys.stderr)
+                elif node == "critic":
+                    print(f"  [critic] {_describe_critic(update or {})}", file=sys.stderr)
                 else:
                     print(f"  [{node}] {_describe_update(node, update or {})}", file=sys.stderr)
     print("--- end hand-offs ---", file=sys.stderr)
@@ -935,6 +988,24 @@ def _print_multi_agent_state(state: dict) -> None:
             print(f"      [{i}] {describe_source(document)}", file=sys.stderr)
     draft = " ".join((state.get("draft") or "").split())
     print(f"  writer         -> draft: {draft[:70]!r}" + ("..." if len(draft) > 70 else ""), file=sys.stderr)
+    if state.get("verdict"):
+        print(
+            f"  critic         -> verdict: {state['verdict']}"
+            f"  ({len(state.get('citation_checks') or [])} citations checked)",
+            file=sys.stderr,
+        )
+    if state.get("revisions"):
+        print(f"  start_revision -> revisions: {state['revisions']}", file=sys.stderr)
+    budgets = state.get("budgets") or {}
+    if budgets:
+        print(
+            "  (per agent)    -> round budgets: "
+            + ", ".join(
+                f"{agent} {entry.get('used', 0)}/{entry.get('cap', '?')}"
+                for agent, entry in budgets.items()
+            ),
+            file=sys.stderr,
+        )
     log = state.get("supervisor_log") or []
     if log:
         dispatches = state.get("dispatches") or {}
@@ -1287,14 +1358,31 @@ def main(argv: list[str] | None = None) -> int:
     multi_parser.add_argument(
         "--max-researcher-runs",
         type=int,
-        default=2,
-        help="How many times the Supervisor may dispatch the Researcher per turn",
+        default=None,
+        help="How many times the Supervisor may dispatch the Researcher per turn (default 2)",
     )
     multi_parser.add_argument(
         "--max-writer-runs",
         type=int,
-        default=2,
-        help="How many times the Supervisor may dispatch the Writer per turn",
+        default=None,
+        help=(
+            "How many times the Supervisor may dispatch the Writer per turn "
+            "(default 2 + max revisions)"
+        ),
+    )
+    multi_parser.add_argument(
+        "--critic",
+        action="store_true",
+        help=(
+            "Put the Critic agent on the Supervisor's roster: it reviews drafts "
+            "and verifies arXiv citations; rejections go back to the Supervisor"
+        ),
+    )
+    multi_parser.add_argument(
+        "--max-revisions",
+        type=int,
+        default=None,
+        help="Rejection rounds per turn. Defaults to RESEARCH_COPILOT_MAX_REVISIONS (2).",
     )
 
     args = parser.parse_args(argv)
@@ -1376,6 +1464,8 @@ def main(argv: list[str] | None = None) -> int:
                 routing=args.routing,
                 max_researcher_runs=args.max_researcher_runs,
                 max_writer_runs=args.max_writer_runs,
+                critic=args.critic,
+                max_revisions=args.max_revisions,
             )
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)

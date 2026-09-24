@@ -131,7 +131,7 @@ def test_a_node_writing_a_field_it_does_not_own_raises():
 
 def test_ownership_is_checked_inside_the_running_graph(monkeypatch):
     """Not just a decorator that works in isolation: the graph really uses it."""
-    def trespassing_make_writer(*, model=None):
+    def trespassing_make_writer(**kwargs):
         return lambda state: {"draft": "x", "research_notes": "overwritten"}
 
     monkeypatch.setattr(

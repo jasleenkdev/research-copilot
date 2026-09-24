@@ -1,4 +1,4 @@
-"""Phase 6: the multi-agent graph. Steps 6.1 (agents) and 6.2 (Supervisor).
+"""Phase 6: the multi-agent graph. Steps 6.1 (agents), 6.2 (Supervisor), 6.3 (Critic).
 
 Read `graph.py` beside this file. That graph is left exactly as Phase 5 built
 it, so the two shapes can be compared directly:
@@ -58,6 +58,24 @@ in the Supervisor's seat, and it takes exactly 6.1's path. So the change from
 6.1 to 6.2 is "who decides", not "what the graph is", the same move Phase 5
 made when it put a model in the reviewer's seat.
 
+--------------------------------------------------------------------------
+6.3: the Critic, and the loop back through the Supervisor
+--------------------------------------------------------------------------
+    supervisor ──"critic"──→ [critic] ──after_critique──┬─ approve ──→ review_draft* or finalize_answer
+        ↑                                               ├─ reject, rounds left ──→ start_revision ─┐
+        │                                               └─ reject, rounds spent ─→ finalize_answer │
+        └──────────────────────────────────────────────────────────────────────────────────────┘
+    supervisor ──"finish"──→ review_draft* or finalize_answer
+    review_draft* ──after_review──┬─ approve/edit ──→ finalize_answer
+                                  ├─ reject, rounds left ──→ start_revision ──→ supervisor
+                                  └─ reject, rounds spent ─→ finalize_answer          (* only with require_approval)
+
+Phase 5's `should_revise` sent a rejection "back to call_model". Here a
+rejection goes back to the *Supervisor*, through `start_revision`, which counts
+the round and resets every agent's round budget. The Supervisor reads the
+critique and chooses who fixes it. There is no edge from a reviewer to the
+Writer anywhere in this graph, and a test checks that.
+
 CONCEPT: hub-and-spoke vs. agents routing to each other
 The alternative to a hub is letting each agent pick its successor: the
 Researcher decides "now the Writer", the Writer decides "back to research".
@@ -94,24 +112,36 @@ from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 from research_copilot.agents.researcher import (
     DEFAULT_MAX_RESEARCH_ITERATIONS,
     build_researcher,
 )
+from research_copilot.agents.critic import DEFAULT_MAX_CRITIC_ITERATIONS, build_critic
 from research_copilot.agents.supervisor import (
-    DEFAULT_DISPATCH_CAPS,
+    approved_by_current_critique,
+    critique_is_current,
+    default_dispatch_caps,
     make_supervisor,
 )
-from research_copilot.agents.writer import make_writer
+from research_copilot.agents.writer import DEFAULT_MAX_WRITER_CALLS, make_writer
 # Reused verbatim from Phase 5: the planner's prompt and its fail-towards-less
 # parser. Planning is not an agent in Phase 6. It is still one cheap structural
 # call that runs before any agent does.
-from research_copilot.graph import DEFAULT_MAX_SUB_QUESTIONS, _parse_plan
+from research_copilot.graph import DEFAULT_MAX_SUB_QUESTIONS, _parse_plan, _parse_verdict
 from research_copilot.models import get_chat_model
-from research_copilot.multi_agent_state import MultiAgentState, owns
+from research_copilot.multi_agent_state import AGENTS, MultiAgentState, owns
 from research_copilot.prompts import PLAN_PROMPT
 from research_copilot.state import Mode
+
+
+# The reflection loop's cap for this graph. It is 2 here, not Phase 5's library
+# default of 0. Phase 5 defaulted to 0 so that an existing Phase 4 caller's
+# behaviour would not change under it. This graph has no earlier callers to
+# protect, and a Critic that can reject but never ask for a fix (0) is not a
+# useful default.
+DEFAULT_MAX_REVISIONS = 2
 
 
 def build_multi_agent_graph(
@@ -129,8 +159,16 @@ def build_multi_agent_graph(
     enable_planning: bool = False,
     max_sub_questions: int = DEFAULT_MAX_SUB_QUESTIONS,
     checkpointer: BaseCheckpointSaver | None = None,
+    # --- 6.3 ---
+    critic_model: BaseChatModel | None = None,
+    critic_tools: Sequence[BaseTool] | None = None,
+    enable_critic: bool = False,
+    require_approval: bool = False,
+    max_revisions: int = DEFAULT_MAX_REVISIONS,
+    max_critic_iterations: int = DEFAULT_MAX_CRITIC_ITERATIONS,
+    max_writer_calls: int = DEFAULT_MAX_WRITER_CALLS,
 ) -> Runnable:
-    """Wire up and compile the 6.1 multi-agent graph.
+    """Wire up and compile the multi-agent graph.
 
     One model argument per agent, each falling back to `model` and then to the
     factory - the same pattern as Phase 5's `critic_model`/`planner_model`.
@@ -148,12 +186,40 @@ def build_multi_agent_graph(
         retriever=retriever,
         max_iterations=max_research_iterations,
     )
-    write_draft = make_writer(model=writer_model or model)
+    write_draft = make_writer(
+        model=writer_model or model, max_calls=max_writer_calls, max_revisions=max_revisions
+    )
+    critic = build_critic(
+        model=critic_model or model, tools=critic_tools, max_iterations=max_critic_iterations
+    )
+    round_caps = {
+        "researcher": max_research_iterations,
+        "writer": max_writer_calls,
+        "critic": max_critic_iterations,
+    }
+    caps = {
+        **default_dispatch_caps(enable_critic=enable_critic, max_revisions=max_revisions),
+        **(dispatch_caps or {}),
+    }
+    if not enable_critic:
+        # Whatever the caller passed, the Critic is not dispatchable when off.
+        caps["critic"] = 0
     supervisor = make_supervisor(
         model=supervisor_model or model,
-        caps=dispatch_caps or DEFAULT_DISPATCH_CAPS,
+        caps=caps,
+        round_caps=round_caps,
+        enable_critic=enable_critic,
+        max_revisions=max_revisions,
         routing=routing,
     )
+
+    if require_approval and checkpointer is None:
+        # Phase 4's build-time refusal, carried over: interrupt() has nowhere to
+        # park a run without a checkpointer.
+        raise RuntimeError(
+            "require_approval=True needs a checkpointer: interrupt() parks the "
+            "run in one. Pass checkpointer=... (see checkpointing.py)."
+        )
 
     # ------------------------------------------------------------------- nodes
 
@@ -184,25 +250,111 @@ def build_multi_agent_graph(
         )
         return {"sub_questions": _parse_plan(raw, max_sub_questions)}
 
+    # --------------------------------------------- 6.3: review and revision
+
+    def review_draft(state: MultiAgentState) -> dict:
+        """Phase 4's human gate, in the multi-agent graph.
+
+        The same interrupt, the same payload shape, the same `_parse_verdict`,
+        and the same discipline: nothing above `interrupt()` except reading
+        state, because a resumed node re-runs from its first line.
+
+        What changed is where the verdict goes. Phase 4 wrote "approved" /
+        "rejected" into the shared `status` and an edit into `draft`. Here the
+        human owns three fields of their own, and an edit never touches the
+        Writer's `draft` (see `human_edit` in multi_agent_state.py).
+        """
+        verdict = interrupt(
+            {
+                "question": state.get("question", ""),
+                "mode": state.get("mode", "live-search"),
+                "draft": state.get("draft", ""),
+                "critique": state.get("critique", "") if state.get("verdict") else "",
+                "prompt": (
+                    "Approve, reject, or edit this draft. Resume with "
+                    "Command(resume={'decision': 'approve'|'reject'|'edit', "
+                    "'text': '<edited answer, for edit>', 'note': '<why>'})"
+                ),
+            }
+        )
+        decision, text, note = _parse_verdict(verdict)
+        if decision == "edit":
+            return {
+                "human_verdict": "edit",
+                "human_edit": text,
+                "human_feedback": note or "(edited by the reviewer)",
+            }
+        if decision == "approve":
+            return {"human_verdict": "approve", "human_edit": "", "human_feedback": note}
+        return {
+            "human_verdict": "reject",
+            "human_edit": "",
+            "human_feedback": note or "(rejected without a reason given)",
+        }
+
+    def start_revision(state: MultiAgentState) -> dict:
+        """Begin a revision round: count it, and reset every agent's round budget.
+
+        CONCEPT: the third reset site
+        Phase 4 reset `iterations` per turn (turn_input). Phase 5 reset it per
+        revision round (start_revision). 6.3 resets every agent's
+        `budgets[agent]["used"]` per revision round, here and only here, so
+        there is one place responsible for "a new round is starting".
+
+            turn boundary    resets everything per-turn: dispatches, revisions,
+                             budgets, verdicts, the log
+            start_revision   resets per-round budgets and bumps `revisions`. It
+                             does NOT touch `dispatches` (per turn, by design)
+
+        That last line is the whole scoping decision in one sentence. See the
+        note on `dispatches` in multi_agent_state.py.
+
+        What it deliberately keeps: the critique and the human's feedback,
+        because they are the revision instruction, and the draft, because it is
+        the text being revised. Clearing them here would send the run on having
+        deleted the reason it was sent. The same list as Phase 5's
+        `revision_input`.
+        """
+        return {
+            "revisions": state.get("revisions", 0) + 1,
+            "budgets": {agent: {"used": 0} for agent in AGENTS},
+        }
+
     def finalize_answer(state: MultiAgentState) -> dict:
-        """Commit the Writer's draft to the shared transcript.
+        """Commit the answer to the shared transcript - or record that it was withheld.
 
         The only node that writes `messages` during a turn - see OWNERS in
         multi_agent_state.py.
 
         It does not clear `draft` afterwards, which Phase 4's version did.
         `draft` belongs to the Writer, and the next turn boundary clears it.
-        Leaving the committed draft in place for the rest of the turn is also
-        simply more informative: the final state shows the Writer's output
-        and the committed answer side by side. They are the same text now, and
-        in 6.4, when a human can edit the answer, they will not always be.
+        The final state therefore shows the Writer's draft, any human edit, and
+        the committed answer side by side.
+
+        6.3: withheld when a reviewer's rejection of the current draft is still
+        standing. The only way to arrive here with one is the revision cap
+        running out. That is the cap overruling the verdict, as in Phase 5, and
+        the message says so, with both reviewers' notes labelled.
 
         An empty draft still commits *something*, for Phase 4's reason. The turn
         opened with a HumanMessage, and leaving it unanswered puts two human
         turns back to back on the next turn, which the Anthropic API rejects.
         """
-        draft = state.get("draft", "").strip()
-        return {"messages": [AIMessage(content=draft or "(the Writer produced no answer)")]}
+        critic_rejects = critique_is_current(state) and state.get("verdict") == "reject"
+        human_rejects = require_approval and state.get("human_verdict") not in ("approve", "edit")
+        if critic_rejects or human_rejects:
+            notes = []
+            if state.get("verdict") == "reject" and state.get("critique"):
+                notes.append(f"critic: {state['critique']}")
+            if state.get("human_verdict") == "reject" and state.get("human_feedback"):
+                notes.append(f"human: {state['human_feedback']}")
+            revisions = state.get("revisions", 0)
+            spent = f" after {revisions} revision{'s' if revisions != 1 else ''}" if revisions else ""
+            reason = "; ".join(notes) or "(no reason recorded)"
+            return {"messages": [AIMessage(content=f"(draft withheld{spent} - {reason})")]}
+
+        text = (state.get("human_edit") or "").strip() or (state.get("draft") or "").strip()
+        return {"messages": [AIMessage(content=text or "(the Writer produced no answer)")]}
 
     def route_from_supervisor(state: MultiAgentState) -> str:
         """Read the Supervisor's decision and name the next node.
@@ -228,11 +380,44 @@ def build_multi_agent_graph(
         the Supervisor, not a bad model reply.
         """
         route = state.get("next_agent", "")
-        if route in ("researcher", "writer"):
+        if route in AGENTS:
             return route
         if route == "finish":
-            return "finalize_answer"
+            # 6.3: "finish" ends the Supervisor's part, not the turn. With a
+            # human gate, the human sees the draft before it is committed.
+            return "review_draft" if require_approval else "finalize_answer"
         raise ValueError(f"supervisor left an unknown next_agent {route!r}")
+
+    def after_critique(state: MultiAgentState) -> str:
+        """Phase 5's `should_revise`, for the Critic's verdict. (6.3)
+
+          approve                  -> the human, if there is one, else commit.
+                                      Critic-first ordering lives here, the same
+                                      place Phase 5 put it.
+          reject, rounds left      -> start_revision, then the SUPERVISOR. This
+                                      is the edge that replaces Phase 5's
+                                      "always back to call_model". Whether to
+                                      revise is decided here, by the cap. Who
+                                      revises is decided there, by reading the
+                                      critique.
+          reject, rounds spent     -> finalize_answer, which withholds. The cap
+                                      overrules the verdict (Phase 5, Part B).
+        """
+        if state.get("verdict") == "approve":
+            return "review_draft" if require_approval else "finalize_answer"
+        if state.get("revisions", 0) >= max_revisions:
+            return "finalize_answer"
+        return "start_revision"
+
+    def after_review(state: MultiAgentState) -> str:
+        """The same decision for the human's verdict. A human rejection is
+        classified by the Supervisor too: "the numbers look wrong" and "too
+        long" are different agents' problems, whoever says them."""
+        if state.get("human_verdict") in ("approve", "edit"):
+            return "finalize_answer"
+        if state.get("revisions", 0) >= max_revisions:
+            return "finalize_answer"
+        return "start_revision"
 
     # ------------------------------------------------------------------ wiring
 
@@ -254,6 +439,15 @@ def build_multi_agent_graph(
     builder.add_node("writer", owns("writer")(write_draft))
     builder.add_node("finalize_answer", owns("finalize_answer")(finalize_answer))
     builder.add_node("supervisor", owns("supervisor")(supervisor))
+    # 6.3. The Critic is a subgraph, added unwrapped for the Researcher's
+    # reasons: its CriticOutput schema is its write contract, and unwrapped it
+    # is drawn and streamed from the inside. `review_draft` and
+    # `start_revision` are registered whatever the flags say - Phase 4's "one
+    # graph shape" rule. `--critic` and `--approve` change which paths are
+    # taken, not which paths exist.
+    builder.add_node("critic", critic)
+    builder.add_node("review_draft", owns("review_draft")(review_draft))
+    builder.add_node("start_revision", owns("start_revision")(start_revision))
 
     # 6.2: the hub. 6.1's fixed edges researcher -> writer -> finalize_answer
     # are gone. Every agent returns to the Supervisor, and the Supervisor's
@@ -266,6 +460,8 @@ def build_multi_agent_graph(
         {
             "researcher": "researcher",
             "writer": "writer",
+            "critic": "critic",
+            "review_draft": "review_draft",
             "finalize_answer": "finalize_answer",
         },
     )
@@ -274,6 +470,26 @@ def build_multi_agent_graph(
     # leave them, and here the dispatch caps guarantee it eventually must.
     builder.add_edge("researcher", "supervisor")
     builder.add_edge("writer", "supervisor")
+
+    # 6.3: the reviewers do NOT return to the Supervisor directly. A verdict
+    # goes through a routing function first, because "is there a revision
+    # left?" is a cap check (code), not a judgement. Only a rejection that can
+    # still be acted on reaches the Supervisor, via start_revision.
+    builder.add_conditional_edges(
+        "critic",
+        after_critique,
+        {
+            "review_draft": "review_draft",
+            "start_revision": "start_revision",
+            "finalize_answer": "finalize_answer",
+        },
+    )
+    builder.add_conditional_edges(
+        "review_draft",
+        after_review,
+        {"start_revision": "start_revision", "finalize_answer": "finalize_answer"},
+    )
+    builder.add_edge("start_revision", "supervisor")
     builder.add_edge("finalize_answer", END)
 
     return builder.compile(checkpointer=checkpointer, name="research-copilot-multi-agent")
@@ -315,6 +531,20 @@ def multi_agent_turn_input(question: str, mode: Mode = "live-search") -> dict:
         "next_agent": "",
         "dispatches": {},
         "supervisor_log": [],
+        # --- 6.3 ---
+        # The reviewers' fields, the revision count, and every agent's round
+        # budget. `budgets` goes through merge_budgets, so a reset has to name
+        # each agent. `{}` would merge as "change nothing" and leave last
+        # turn's spend in place. The same trap as an accumulating log, and the
+        # reason this list is explicit.
+        "critique": "",
+        "verdict": "",
+        "citation_checks": [],
+        "human_verdict": "",
+        "human_feedback": "",
+        "human_edit": "",
+        "revisions": 0,
+        "budgets": {agent: {"used": 0} for agent in AGENTS},
     }
 
 
@@ -342,22 +572,19 @@ def make_graph(config: dict | None = None) -> Runnable:
 
 
 # --------------------------------------------------------------------------
-# NOTE FOR 6.2 / 6.3: counters
+# COUNTERS, AS OF 6.3
 # --------------------------------------------------------------------------
-# `research_iterations` is the first per-agent counter. Right now it needs no
-# reset site of its own. The subgraph's private state starts fresh every time
-# the Researcher is invoked (see agents/researcher.py), and the Researcher
-# counts from 0 inside it. The parent-level copy is only a *report* of what the
-# last research pass spent.
+# Four counters, three scopes, and each is reset in exactly one place:
 #
-# That stopped being enough in 6.2. Once the Supervisor can send work back to
-# the Researcher, the Researcher runs more than once per turn, and each run
-# starts counting from zero. So the tool budget is per *invocation*.
+#   counter                    scope                reset by           caps it
+#   -------------------------  -------------------  -----------------  --------------------
+#   research_iterations        one Researcher pass  (private start)    - (a report)
+#   budgets[agent]["used"]     one revision round   start_revision     max_*_iterations /
+#                                                                      max_writer_calls
+#   dispatches[agent]          one turn             turn boundary      dispatch caps
+#   revisions                  one turn             turn boundary      max_revisions
 #
-# 6.2 caps the number of invocations instead: `dispatches` (Supervisor-owned)
-# against DEFAULT_DISPATCH_CAPS. The total research spend in a turn is now
-# bounded by dispatch cap x research-iteration cap. That is two numbers in two
-# places, and neither is visible from the other, which is the smell 6.3's
-# per-agent budget structure exists to fix. It also has to decide whether a
-# budget resets per revision (Phase 5's `iterations`) or per turn (6.2's
-# `dispatches`). That choice, not the container type, is the real decision.
+# The rule from Phase 5 held a third time: one counter per loop, reset by
+# whoever begins a pass of that loop. What 6.3 added is the table itself. With
+# this many counters, the scope of each has to be written down where a reader
+# (or Phase 7's eval) will look for it.

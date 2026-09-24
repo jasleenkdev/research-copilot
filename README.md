@@ -36,7 +36,8 @@ next, not to ship the final system as fast as possible.
     hand-off, one owner per state field
   - [x] 6.2 Supervisor routing via structured output, with code guards,
     a decision log, and the Researcher's brief/outcome/merge-on-rerun contract
-  - [ ] 6.3 Critic agent with its own tools; per-agent budgets
+  - [x] 6.3 Critic agent (subgraph, `verify_citation`), rejections classified by
+    the Supervisor, per-agent round budgets, graph-level human gate
   - [ ] 6.4 CLI flags (`--critic`/`--approve`/`--plan`), threads, Studio
 - [ ] **Phase 7: Production.** Streaming via `astream_events`, per-node error
   handling, retries and fallback models, LangSmith dataset evaluation, and a
@@ -974,6 +975,75 @@ ping-pong.
   never rewrites. Knowledge-base excerpts keep their `[n]` numbers. A pass that
   finds nothing leaves the notes unchanged.
 
+## Usage (Phase 6.3)
+
+```bash
+research-copilot multi-agent "How are RAG pipelines evaluated?" --critic
+research-copilot multi-agent "..." --critic --max-revisions 1
+research-copilot draw-graph multi     # researcher and critic both drawn as subgraphs
+```
+
+The Critic is Phase 5's `critique_draft` promoted to an agent. It keeps the
+same APPROVE/REJECT first line and the same fail-closed parser (imported, not
+copied). It adds a `verify_citation` tool (arXiv lookup by id) and the research
+notes as input, so it checks claims against the evidence and citations against
+arXiv. Its verification calls go to a private `critic_messages` channel,
+exactly like the Researcher's tool loop. The tests for that were written
+before the Critic was.
+
+A rejection counts against `revisions` and then goes to the **Supervisor**,
+which decides whose problem it is:
+
+```
+  [critic] REJECT  checks: 2309.15217=found, 2311.09476=found
+      note: Writing: cites ARES (2311.09476), which exists but is not in the research notes
+  [start_revision] revisions=1, budgets={... all used: 0}
+  [supervisor] -> writer
+      why: Critic says the Writer added a source not in the notes: a writing problem.
+```
+
+### Staleness, from dispatch order alone
+
+| Question | Answer, derived from `supervisor_log` |
+| --- | --- |
+| Is the draft stale? (6.2) | the last dispatch was the Researcher, and its pass changed the notes |
+| Was the draft rejected and not yet rewritten? | no Writer dispatch stamped with the current revision |
+| Is the critique current? | the Critic was dispatched after the last Writer dispatch |
+
+A stale approval approves nothing. `finish` on a draft whose approval predates
+it goes back to the Critic.
+
+### Four counters, three scopes
+
+| Counter | Scope | Reset by | Bounds |
+| --- | --- | --- | --- |
+| `research_iterations` | one Researcher pass | (private start) | — (a report) |
+| `budgets[agent]["used"]` | one revision round | `start_revision` | work inside a round |
+| `dispatches[agent]` | one turn | turn boundary only | the hub (termination) |
+| `revisions` | one turn | turn boundary only | rejection rounds |
+
+`dispatches` is deliberately never reset by a revision. It is the number that
+means "how many times this turn sent work to that agent", and the termination
+bound depends on it. A mutation that reset it per revision broke the
+no-infinite-loop test.
+
+`budgets` is a TypedDict per agent (`{used, cap}`) under a per-agent,
+per-field merge reducer. Each agent writes only its own entry: `owns()`
+enforces that for plain nodes. The subgraphs return the whole dict as
+passthrough, which is a no-op while nodes run one at a time (see the note in
+`owns`).
+
+### Flag meanings across phases
+
+| Flag | Phase 5 (`graph-agent`) | Phase 6.3 (`multi-agent`) |
+| --- | --- | --- |
+| `--critic` | a `critique_draft` node reviews every draft; a rejection goes back to `call_model` | puts the Critic agent on the Supervisor's roster; it verifies citations; a rejection goes to the Supervisor to be classified |
+| `--max-revisions` | rejection rounds per turn | same, from either reviewer; also scales the Writer/Critic dispatch caps |
+| `--approve` | human gate, after the critic when both are on | same meaning at graph level (`require_approval`); the CLI flag arrives in 6.4 with `--thread`/`review` |
+| `--plan` | `plan_question` before research | unchanged |
+
+`graph-agent` keeps its Phase 5 meanings for every flag.
+
 ## Where each Phase 6 concept lives
 
 | Concept | File |
@@ -1000,3 +1070,15 @@ ping-pong.
 | Hub-and-spoke vs agents routing each other | `multi_agent_graph.py` (6.2 docstring) |
 | Why the decision log does not use `operator.add` | `multi_agent_state.py` → `supervisor_log` |
 | Briefs and merge-on-rerun | `agents/researcher.py` (6.2 docstring), `compile_notes`, `retrieve` |
+| The Critic as a subgraph with a private channel | `agents/critic.py` (module docstring); `tests/test_critic_agent.py` (written first) |
+| Checking a citation instead of doubting it | `tools/citations.py` |
+| A failed lookup is not a missing paper | `tools/citations.py`; `tests/test_citations.py` |
+| Rejections classified by the Supervisor | `agents/supervisor.py` (6.3 docstring); `multi_agent_graph.py` → `after_critique` |
+| Staleness, second case (critiques) | `agents/supervisor.py` → `critique_is_current`, `draft_was_rejected` |
+| The roster guard, and logging a proposal instead of forbidding it | `agents/supervisor.py` (6.3 docstring), `apply_guards` |
+| Per-agent budget TypedDict and its reducer | `multi_agent_state.py` → `AgentBudget`, `merge_budgets`, `budget_of` |
+| Ownership one level down (budget entries) | `multi_agent_state.py` → `BUDGET_ENTRY_OWNERS`, `owns` |
+| Scope of `dispatches` vs `budgets` vs `revisions` | `multi_agent_state.py` → `dispatches`; `multi_agent_graph.py` (bottom) |
+| The third reset site | `multi_agent_graph.py` → `start_revision` |
+| A human edit as its own field | `multi_agent_state.py` → `human_edit` |
+| Reducer keys read back as empty, not missing | `tests/test_revisions_and_budgets.py` → pre-6.3 migration test |

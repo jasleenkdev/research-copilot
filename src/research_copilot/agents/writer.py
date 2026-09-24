@@ -44,13 +44,35 @@ against evidence it was never shown.
 So when the notes are thin, the Writer's job is to *say* they are thin. It is
 not the Writer's job to fill the gap from memory. In 6.2, the Supervisor is what
 notices "thin notes" and sends the work back to the Researcher.
+
+--------------------------------------------------------------------------
+6.3: revising
+--------------------------------------------------------------------------
+This node now does what Phase 5's `call_model` did on a revision. When
+`revisions > 0`, the request carries Phase 5's REVISION_INSTRUCTIONS, with the
+previous draft and both reviewers' notes, each labelled with its author. What
+changed is how the Writer got here. Phase 5 routed every rejection "back to
+call_model". Here a rejection goes to the Supervisor, and the Writer is
+dispatched only if the Supervisor judged the problem to be a *writing* problem.
+An evidence problem goes to the Researcher first, and the Writer then revises
+from the merged notes.
+
+The Writer also records its own spend in `budgets["writer"]` (one per draft),
+and writes only that entry. See BUDGET_ENTRY_OWNERS.
 """
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from research_copilot.models import get_chat_model
-from research_copilot.multi_agent_state import MultiAgentState
+from research_copilot.multi_agent_state import MultiAgentState, budget_of
+# Phase 5's revision instruction, reused verbatim: the Writer is the node that
+# inherits call_model's revising half, so it inherits the prompt too.
+from research_copilot.prompts import REVISION_INSTRUCTIONS
+
+# Drafts per revision round. 2 leaves room for one rewrite after a mid-round
+# re-research, on top of the first draft.
+DEFAULT_MAX_WRITER_CALLS = 2
 
 # The Writer's prompt. It has two variants because the modes make different
 # promises about sources. The shared part is the discipline: cite what the notes
@@ -88,7 +110,44 @@ NO_NOTES = (
 )
 
 
-def make_writer(*, model: BaseChatModel | None = None):
+def revision_instruction(state: MultiAgentState, max_revisions: int) -> list[BaseMessage]:
+    """Phase 5's `_revision_instruction`, reading 6.3's per-reviewer fields.
+
+    `revisions > 0` is still the signal, for Phase 5's reason: the counter
+    already knows, and a separate flag would be a second thing to keep in sync.
+    Both reviewers' notes are included and labelled by source. When they
+    disagree, the Writer needs to see who said what.
+    """
+    if state.get("revisions", 0) <= 0:
+        return []
+    feedback = []
+    if state.get("critique") and state.get("verdict") == "reject":
+        feedback.append(f"- Critic: {state['critique']}")
+    if state.get("human_feedback") and state.get("human_verdict") == "reject":
+        feedback.append(f"- Human reviewer: {state['human_feedback']}")
+    if not feedback:
+        feedback.append(
+            "- The draft was rejected without a reason being recorded. Re-read "
+            "the question and the notes and write the strongest answer you can."
+        )
+    return [
+        SystemMessage(
+            content=REVISION_INSTRUCTIONS.format(
+                attempt=state.get("revisions", 0),
+                cap=max_revisions,
+                draft=(state.get("draft") or "").strip() or "(the previous draft was empty)",
+                feedback="\n".join(feedback),
+            )
+        )
+    ]
+
+
+def make_writer(
+    *,
+    model: BaseChatModel | None = None,
+    max_calls: int = DEFAULT_MAX_WRITER_CALLS,
+    max_revisions: int = 0,
+):
     """Build the Writer node.
 
     It returns a plain function, not a compiled graph - see the top of this
@@ -140,6 +199,10 @@ def make_writer(*, model: BaseChatModel | None = None):
         # Earlier turns only. Because the Researcher's tool loop is private,
         # this history is clean - human turns and committed answers, nothing
         # else. A Phase 5 transcript would have carried every tool call here.
+        # 6.3: the revision instruction goes last among the instructions,
+        # closest to the turn it asks to be redone - same placement as Phase 5.
+        instructions.extend(revision_instruction(state, max_revisions))
+
         history = list(state.get("messages", []))
         if history and isinstance(history[-1], HumanMessage):
             history = history[:-1]
@@ -150,8 +213,9 @@ def make_writer(*, model: BaseChatModel | None = None):
         )
 
         ai_message = writer_model().invoke([*instructions, *history, final_turn])
-        # The Writer's one field. `owns("writer")` in the graph checks that this
-        # stays true.
-        return {"draft": ai_message.text}
+        used = budget_of(state, "writer", max_calls)["used"] + 1
+        # The Writer's fields: its draft, and its own budget entry.
+        # `owns("writer")` checks both, the entry included.
+        return {"draft": ai_message.text, "budgets": {"writer": {"used": used, "cap": max_calls}}}
 
     return write_draft

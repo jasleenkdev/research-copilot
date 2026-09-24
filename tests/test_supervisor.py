@@ -69,6 +69,7 @@ class ScriptedSupervisor:
     def __init__(self, script):
         self.script = iter(script)
         self.views: list[str] = []
+        self.systems: list[str] = []
         self.methods: list[str] = []
 
     def with_structured_output(self, schema, *, method="function_calling", **kwargs):
@@ -77,6 +78,7 @@ class ScriptedSupervisor:
 
         def reply(messages):
             self.views.append(messages[-1].content)
+            self.systems.append(messages[0].content)
             item = next(self.script)
             if isinstance(item, Exception):
                 raise item
@@ -181,8 +183,8 @@ def test_view_shows_outcome_budget_staleness_and_its_own_history():
     view = render_supervisor_view(state, CAPS)
 
     assert "Latest research pass: findings" in view
-    assert "researcher: 2 of 2 used" in view
-    assert "writer: 1 of 2 used" in view
+    assert "researcher: dispatched 2 of 2 this turn" in view
+    assert "writer: dispatched 1 of 2 this turn" in view
     assert "STALE" in view
     assert "(brief: benchmarks)" in view
     assert "notes v2" in view
@@ -266,25 +268,49 @@ def test_overrides_are_logged_beside_the_proposal_inside_a_run():
 
 
 @pytest.mark.parametrize(
-    "bad",
+    "bad, attempted",
     [
-        ValueError("model returned prose"),
-        {"rationale": "use the critic", "next": "critic"},  # not an agent (yet)
-        {"next": "writer"},  # missing rationale
+        (ValueError("model returned prose"), None),
+        ({"rationale": "r", "next": "editor"}, "editor"),  # not an agent at all
+        ({"next": "writer"}, "writer"),  # missing rationale
     ],
     ids=["raises", "unknown-agent", "missing-field"],
 )
-def test_unusable_supervisor_output_falls_back_to_the_fixed_policy(bad):
+def test_unusable_supervisor_output_falls_back_to_the_fixed_policy(bad, attempted):
+    """6.3: where the attempted route can be recovered, it is logged as
+    `proposed` - 6.2 logged None and lost it."""
     supervisor = ScriptedSupervisor([bad, decide("writer"), decide("finish")])
     state = run_multi_agent(
         "Q", graph=hub(supervisor=supervisor, researcher=scripted("notes"), writer=scripted("a"))
     )
     first = state["supervisor_log"][0]
-    assert first["proposed"] is None
+    assert first["proposed"] == attempted
     assert first["override"] == "fallback to fixed policy"
     assert "unusable" in first["rationale"]
     assert first["routed_to"] == "researcher"
     assert final_answer(state) == "a"
+
+
+def test_critic_proposed_while_off_is_logged_verbatim_and_refused():
+    """The question from the 6.3 brief: a Supervisor that proposes the Critic
+    when --critic is off. "critic" is now a valid route, so it validates, and
+    the *roster guard* refuses it - with the proposal in the log, not lost to a
+    validation error the way 6.2 lost it."""
+    supervisor = ScriptedSupervisor(
+        [decide("researcher"), decide("writer"), decide("critic", "want a review"), decide("finish")]
+    )
+    state = run_multi_agent(
+        "Q", graph=hub(supervisor=supervisor, researcher=scripted("notes"), writer=scripted("a"))
+    )
+    third = state["supervisor_log"][2]
+    assert third["proposed"] == "critic"
+    assert third["rationale"] == "want a review"
+    assert third["override"] == "critic is not on the roster"
+    assert third["routed_to"] == "finish"
+    assert "critic" not in state["dispatches"]
+    # And the prompt never offered it.
+    assert "- critic:" not in supervisor.systems[0]
+    assert "- researcher:" in supervisor.systems[0]
 
 
 def test_a_supervisor_that_always_fails_degrades_to_exactly_6_1():

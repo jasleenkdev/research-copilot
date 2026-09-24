@@ -109,10 +109,114 @@ from research_copilot.state import Mode
 ResearchOutcome = Literal["findings", "nothing_found", "budget_exhausted"]
 
 # 6.2. The places the Supervisor can send the run. "finish" is not an agent. It
-# routes to `finalize_answer`, which commits the draft. The Critic joins this
-# Literal in 6.3, and not before: a Supervisor offered an agent that does not
-# exist yet will sometimes pick it.
-Route = Literal["researcher", "writer", "finish"]
+# ends the Supervisor's part of the turn: `finalize_answer` commits the draft,
+# or `review_draft` asks a human first (6.3, when approval is on).
+#
+# 6.3: "critic" joins. It is in the Literal - and therefore in the structured-
+# output schema - whether or not `--critic` is on. Whether the Critic is on the
+# *roster* for a given run is a code guard (agents/supervisor.py), not a
+# schema variant. That way a model that proposes the Critic when it is off gets
+# its proposal logged verbatim beside the override that refused it, rather than
+# being made unable to say it. See "the roster guard" in agents/supervisor.py.
+Route = Literal["researcher", "writer", "critic", "finish"]
+
+# Every agent that has a budget. Three since 6.3.
+AGENTS: tuple[str, ...] = ("researcher", "writer", "critic")
+
+# 6.3. The Critic's verdict on the draft it was shown. It has two values plus
+# "not yet", and deliberately no "edit". Phase 5's reasoning holds: rewriting is
+# the Writer's job, and a Critic that rewrites is a second Writer nobody reviews.
+Verdict = Literal["approve", "reject"]
+
+# 6.3. The human reviewer's verdict: Phase 4's three decisions. "edit" is the
+# one power a person has that the Critic does not.
+HumanVerdict = Literal["approve", "edit", "reject"]
+
+
+class CitationCheck(TypedDict):
+    """One `verify_citation` result, lifted out of the Critic's private channel.
+
+    status:
+      found       arXiv has a paper with this id
+      not_found   the id is well-formed and arXiv has no such paper - a
+                  fabricated or mistyped citation
+      invalid     the id is not a well-formed arXiv id at all
+      error       the lookup itself failed (network, rate limit). This says
+                  nothing about the citation, and the Critic is told not to
+                  count it against the draft.
+    """
+
+    arxiv_id: str
+    status: Literal["found", "not_found", "invalid", "error"]
+
+
+# --------------------------------------------------------------------------
+# 6.3: per-agent budgets
+# --------------------------------------------------------------------------
+class AgentBudget(TypedDict, total=False):
+    """One agent's model-call budget for the current revision round.
+
+    `used`  model calls this agent has made in the current round. The Researcher
+            and Critic count every step of their tool loops. The Writer counts
+            one per draft.
+    `cap`   the configured cap, recorded beside `used` so that a reader (the
+            Supervisor's view, Studio, Phase 7's eval tooling) sees both halves
+            without the build config. Enforcement reads the config, the same
+            split Phase 5 made between checkpointed `revisions` and the
+            `max_revisions` closure. `cap` in state is a record, not the rule.
+
+    A TypedDict rather than a dataclass. It is a plain dict at runtime, so
+    it goes through the checkpoint serializer and shows up in Studio's state
+    panel exactly like every other key, and an old checkpoint that lacks a
+    field reads back as a dict missing that key, not as a failed object
+    construction. `total=False` plus `budget_of()` below is the migration path.
+    """
+
+    used: int
+    cap: int
+
+
+def merge_budgets(
+    existing: dict[str, AgentBudget] | None, update: dict[str, AgentBudget] | None
+) -> dict[str, AgentBudget]:
+    """The per-agent reducer for `budgets`.
+
+    CONCEPT: a reducer that merges per agent, and per field
+    Three agents and one reset site all write `budgets`. With the default
+    overwrite reducer, the Writer returning `{"writer": {...}}` would replace
+    the whole dict and erase the Researcher's and Critic's entries. This is the
+    6.1 two-agents-one-field bug, one level down. So the merge goes one level
+    deep:
+
+        {"researcher": {"used": 3, "cap": 6}, "writer": {"used": 1, "cap": 3}}
+      + {"writer": {"used": 2, "cap": 3}}
+      = {"researcher": {"used": 3, "cap": 6}, "writer": {"used": 2, "cap": 3}}
+
+    and one level deeper still. Fields inside an entry merge too, so a reset
+    can write `{"writer": {"used": 0}}` without knowing the cap, and the
+    recorded cap survives.
+
+    What the reducer cannot do is know *who* wrote an entry. That is the job of
+    `owns()` (below) for plain nodes. For the subgraph agents, see the note on
+    passthrough in `owns`.
+    """
+    merged: dict[str, AgentBudget] = {k: dict(v) for k, v in (existing or {}).items()}
+    for agent, entry in (update or {}).items():
+        merged[agent] = {**merged.get(agent, {}), **(entry or {})}
+    return merged
+
+
+def budget_of(state: "MultiAgentState", agent: str, default_cap: int) -> AgentBudget:
+    """An agent's budget entry, with defaults for anything missing.
+
+    This is how every reader gets a budget, and it is the migration path. A
+    thread checkpointed before 6.3 has no `budgets` key at all, and a thread
+    from partway through a turn may lack one agent's entry. Both read as
+    "nothing used, configured cap", which is exactly what an agent that has not
+    run this round has spent.
+    """
+    entry = (state.get("budgets") or {}).get(agent) or {}
+    return {"used": entry.get("used", 0), "cap": entry.get("cap", default_cap)}
 
 
 class SupervisorLogEntry(TypedDict):
@@ -131,6 +235,10 @@ class SupervisorLogEntry(TypedDict):
     routed_to: str
     override: str
     brief: str
+    # 6.3. The revision round this decision was made in. It is what lets
+    # staleness checks tell "the Writer ran this round" from "the Writer ran
+    # before the last rejection", using the log's ordering alone.
+    revision: int
 
 
 class MultiAgentState(TypedDict, total=False):
@@ -222,8 +330,32 @@ class MultiAgentState(TypedDict, total=False):
     # dispatching is the Supervisor's action: an agent cannot count how often
     # it is *called*. The Researcher in particular starts its private state
     # from scratch on every call (see agents/researcher.py). These counts are
-    # checked against per-agent caps by the Supervisor's guards, and they are
-    # what bounds the hub. 6.3 turns this into the per-agent budget structure.
+    # checked against per-agent dispatch caps by the Supervisor's guards, and
+    # they are what bounds the hub.
+    #
+    # CONCEPT (6.3): the scope of this number, stated once so nobody has to
+    # re-derive it
+    #
+    #     dispatches[agent]         per TURN. Reset only by the turn boundary.
+    #                               NEVER reset by start_revision.
+    #     budgets[agent]["used"]    per REVISION ROUND. Reset by start_revision.
+    #     revisions                 per TURN. The outer cap on rounds.
+    #
+    # Same argument as Phase 5's iterations/revisions split, one level down.
+    # A count is interpretable on its own only if it is reset on exactly one
+    # schedule, and that schedule is written next to it. If `dispatches` reset
+    # every revision, "researcher: 2" at the end of a turn would mean "twice in
+    # whichever round happened to be last", and total research effort would
+    # be unrecoverable from the final state. As a per-turn count it means one
+    # thing: how many times this turn's answer sent work to that agent. That is
+    # the number Phase 7's evaluation should read as "dispatches used", without
+    # consulting this code.
+    #
+    # The two scopes also bound different things. `dispatches` bounds the *hub*:
+    # every non-finish route spends one, so no Supervisor can loop. `budgets`
+    # bounds the *work inside a round*: a Researcher sent back twice in one
+    # round shares one tool budget across both passes, instead of getting a
+    # fresh one each time (the 6.1 per-invocation gap).
     dispatches: dict[str, int]
 
     # Every decision this turn, oldest first. See SupervisorLogEntry.
@@ -237,6 +369,41 @@ class MultiAgentState(TypedDict, total=False):
     # `[]` really does reset it. Single ownership is what makes that safe: with
     # two writers, read-then-overwrite would lose entries.
     supervisor_log: list[SupervisorLogEntry]
+
+    # --- the Critic's output (owner: critic) -----------------------------------
+    # Phase 5's `critique` field, now with one author, the Critic agent. The
+    # human's notes moved to their own fields below for the same reason
+    # Phase 5 kept them apart: the audit trail must say which reviewer objected.
+    critique: str
+    verdict: Verdict | Literal[""]
+    # What `verify_citation` said, per id, in the critic's latest pass. Lifted
+    # out of the private channel as structured results, the same move as
+    # `research_outcome`. The Supervisor reads "2401.00001: not_found" as a
+    # fact, instead of inferring it from the critique's prose.
+    citation_checks: list[CitationCheck]
+
+    # --- the human reviewer's output (owner: review_draft) ---------------------
+    # Phase 4's `human_feedback`, plus the two things a human verdict carries
+    # that a critic's does not.
+    human_verdict: HumanVerdict | Literal[""]
+    human_feedback: str
+    # CONCEPT (6.3): a human edit gets its own field, because `draft` is the
+    # Writer's. In Phase 4 the reviewer's edited text overwrote `draft` - one
+    # field, two authors, which the ownership rule now forbids. So the edit
+    # lands here, and `finalize_answer` commits `human_edit` if there is one,
+    # else `draft`. The final state then shows what the Writer wrote *and*
+    # what the human changed it to. 6.1's note on `finalize_answer` predicted
+    # the two would stop being the same text; this is where.
+    human_edit: str
+
+    # --- the revision loop (owner: start_revision) -----------------------------
+    # Phase 5's outer counter, unchanged in meaning: rejection rounds this turn,
+    # capped by `max_revisions`. Incremented only by `start_revision`, which is
+    # also the single reset site for every agent's `budgets[...]["used"]`.
+    revisions: int
+    # See AgentBudget and merge_budgets above. Each agent writes only its own
+    # entry. `start_revision` writes all of them (the reset).
+    budgets: Annotated[dict[str, AgentBudget], merge_budgets]
 
 
 class ResearcherInput(TypedDict, total=False):
@@ -271,6 +438,8 @@ class ResearcherInput(TypedDict, total=False):
     researcher_brief: str
     research_notes: str
     documents: list[Document]
+    # --- 6.3 --- its own budget entry, to know what is left this round
+    budgets: Annotated[dict[str, AgentBudget], merge_budgets]
 
 
 class ResearcherOutput(TypedDict, total=False):
@@ -287,6 +456,38 @@ class ResearcherOutput(TypedDict, total=False):
     documents: list[Document]
     research_iterations: int
     research_outcome: ResearchOutcome | Literal[""]
+    budgets: Annotated[dict[str, AgentBudget], merge_budgets]
+
+
+class CriticInput(TypedDict, total=False):
+    """What the Critic subgraph may read. (6.3)
+
+    The draft, the question it answers, and - new since Phase 5 - the research
+    notes it was written from. Phase 5's critic saw only the draft, so "is this
+    claim supported?" meant "does it sound supported?". With the notes it
+    means "is it in the evidence?", and with `verify_citation` "does the source
+    exist?" becomes a lookup rather than a suspicion.
+
+    Not readable: the Supervisor's log, the Researcher's private channel, the
+    human's notes. The Critic judges the draft against the evidence. It does not
+    judge the process that produced them.
+    """
+
+    question: str
+    mode: Mode
+    sub_questions: list[str]
+    draft: str
+    research_notes: str
+    budgets: Annotated[dict[str, AgentBudget], merge_budgets]
+
+
+class CriticOutput(TypedDict, total=False):
+    """What the Critic subgraph may write back. (6.3)"""
+
+    critique: str
+    verdict: Verdict | Literal[""]
+    citation_checks: list[CitationCheck]
+    budgets: Annotated[dict[str, AgentBudget], merge_budgets]
 
 
 # --------------------------------------------------------------------------
@@ -303,13 +504,29 @@ OWNERS: dict[str, frozenset[str]] = {
     "plan_question": frozenset({"sub_questions"}),
     # Must match ResearcherOutput exactly. tests/test_multi_agent.py checks it.
     "researcher": frozenset(ResearcherOutput.__annotations__),
-    "writer": frozenset({"draft"}),
+    # 6.3: and its own `budgets` entry - see BUDGET_ENTRY_OWNERS.
+    "writer": frozenset({"draft", "budgets"}),
+    # Must match CriticOutput exactly, same check as the Researcher.
+    "critic": frozenset(CriticOutput.__annotations__),
+    "review_draft": frozenset({"human_verdict", "human_feedback", "human_edit"}),
+    "start_revision": frozenset({"revisions", "budgets"}),
     "finalize_answer": frozenset({"messages"}),
     # 6.2. Routing fields only. The Supervisor can read everything and write
     # nothing that an agent produces.
     "supervisor": frozenset(
         {"next_agent", "researcher_brief", "dispatches", "supervisor_log"}
     ),
+}
+
+
+# 6.3: ownership one level down. For the shared `budgets` dict, which *entries*
+# each writer may touch. `start_revision` is the reset site, so it writes all
+# of them. Everyone else writes only their own.
+BUDGET_ENTRY_OWNERS: dict[str, frozenset[str]] = {
+    "researcher": frozenset({"researcher"}),
+    "writer": frozenset({"writer"}),
+    "critic": frozenset({"critic"}),
+    "start_revision": frozenset(AGENTS),
 }
 
 
@@ -330,6 +547,22 @@ def owns(node_name: str) -> Callable[[Callable], Callable]:
     name is passed explicitly, rather than taken from the function, so that the
     ownership entry and the graph's node name are visibly the same string at
     the one place they meet.
+
+    6.3 extends the check into `budgets`: a plain node may write only the
+    entries BUDGET_ENTRY_OWNERS gives it.
+
+    CONCEPT (6.3): where sub-key ownership stops being enforceable - subgraphs
+    The Researcher and Critic subgraphs are not wrapped (see 6.1), and their
+    output_schema works at *key* granularity. A subgraph that reads `budgets`
+    and updates its own entry returns the *whole* dict as its output: the
+    other agents' entries come back as passthrough, unchanged. Under
+    `merge_budgets` that passthrough rewrites those entries with the values
+    they already had, a no-op, because this graph runs one node at a time. It
+    would stop being a no-op the day two branches run in parallel (Phase 7's
+    fan-out). Then a stale passthrough copy could overwrite a concurrent
+    update. The fix at that point is a per-agent key or a delta reducer, not a
+    cleverer merge. `test_subgraph_budget_passthrough_leaves_other_entries_alone`
+    pins down the current, sequential behaviour.
     """
     allowed = OWNERS[node_name]
 
@@ -345,6 +578,15 @@ def owns(node_name: str) -> Callable[[Callable], Callable]:
                     "agent needs this value, it belongs in a field this node "
                     "owns and the other agent should read it from there."
                 )
+            # 6.3: the same rule inside `budgets`, per entry.
+            if "budgets" in update:
+                entries = BUDGET_ENTRY_OWNERS.get(node_name, frozenset())
+                foreign = set(update["budgets"] or {}) - entries
+                if foreign:
+                    raise OwnershipError(
+                        f"node {node_name!r} wrote budget entries {sorted(foreign)}, "
+                        f"which it does not own. It may write only {sorted(entries)}."
+                    )
             return update
 
         return checked

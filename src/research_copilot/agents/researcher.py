@@ -145,7 +145,7 @@ from langgraph.graph.message import add_messages
 
 from research_copilot.agent_loop import _execute_tool_call
 from research_copilot.models import get_chat_model
-from research_copilot.multi_agent_state import ResearcherInput, ResearcherOutput
+from research_copilot.multi_agent_state import ResearcherInput, ResearcherOutput, budget_of
 from research_copilot.retrieval import format_docs, get_retriever
 from research_copilot.tools import search_arxiv
 
@@ -153,6 +153,13 @@ from research_copilot.tools import search_arxiv
 # DEFAULT_MAX_ITERATIONS, because it is the same loop moved into an agent. It
 # is named for the agent, though, because in 6.3 every agent gets its own
 # budget and "max_iterations" stops meaning one thing.
+#
+# 6.3: the cap is per *revision round*, across every Researcher invocation in
+# that round, and no longer per invocation. The round total is
+# `budgets["researcher"]["used"]` in the parent state, and `start_revision`
+# resets it. A Researcher sent back twice in one round shares one budget
+# between the two passes. Before 6.3 each pass got a fresh one, the gap flagged
+# at the bottom of multi_agent_graph.py.
 DEFAULT_MAX_RESEARCH_ITERATIONS = 6
 
 
@@ -257,6 +264,18 @@ def build_researcher(
 
     # ----------------------------------------------------------------- nodes
 
+    def spent(state: ResearcherState) -> int:
+        """Round spend: what earlier passes this round recorded, plus this pass."""
+        return (
+            budget_of(state, "researcher", max_iterations)["used"]
+            + state.get("research_iterations", 0)
+        )
+
+    def budget_update(state: ResearcherState) -> dict:
+        """This agent's own `budgets` entry, and only its own (see
+        BUDGET_ENTRY_OWNERS). The merge reducer leaves the other entries alone."""
+        return {"researcher": {"used": spent(state), "cap": max_iterations}}
+
     def _merge(previous: str, new: str, brief: str) -> str:
         """Merge-on-rerun for text notes: append, never rewrite."""
         if not previous:
@@ -307,6 +326,9 @@ def build_researcher(
             "research_notes": format_docs(documents) if documents else "",
             "research_iterations": 0,
             "research_outcome": "findings" if found_new else "nothing_found",
+            # No model calls on this path, so the entry is unchanged. It is
+            # still written, so that the entry's cap is recorded in state.
+            "budgets": budget_update(state),
         }
 
     def research_model(state: ResearcherState) -> dict:
@@ -378,6 +400,10 @@ def build_researcher(
         }
 
     def compile_notes(state: ResearcherState) -> dict:
+        """The loop's hand-over, plus this pass's spend recorded in `budgets`."""
+        return {**_compile_notes(state), "budgets": budget_update(state)}
+
+    def _compile_notes(state: ResearcherState) -> dict:
         """Turn the private loop's end state into the fields that leave it.
 
         CONCEPT: an agent must always hand something over.
@@ -432,6 +458,11 @@ def build_researcher(
                 "research_outcome": "budget_exhausted",
             }
 
+        if last is None:
+            # No step ran at all: the round budget was spent before this pass
+            # began (see route_research).
+            return {"research_notes": previous, "research_outcome": "budget_exhausted"}
+
         # The model ended with an empty reply and no tool call.
         return {"research_notes": previous, "research_outcome": "nothing_found"}
 
@@ -450,6 +481,13 @@ def build_researcher(
         if mode == "knowledge-base":
             return "retrieve"
         if mode == "live-search":
+            # 6.3: a pass that starts with the round budget already spent makes
+            # no model call. It goes straight to the hand-over, which reports
+            # budget_exhausted and leaves the notes as they were. The
+            # Supervisor's guards should never dispatch it in that state; this
+            # is the second line of defence.
+            if spent(state) >= max_iterations:
+                return "compile_notes"
             return "research_model"
         raise ValueError(
             f"researcher got an unknown mode {mode!r}; "
@@ -463,7 +501,7 @@ def build_researcher(
         A research loop that stops must still produce notes. See
         `compile_notes` for why.
         """
-        if state.get("research_iterations", 0) >= max_iterations:
+        if spent(state) >= max_iterations:
             return "compile_notes"
         messages = state.get("research_messages", [])
         last = messages[-1] if messages else None
@@ -491,7 +529,11 @@ def build_researcher(
     builder.add_conditional_edges(
         START,
         route_research,
-        {"retrieve": "retrieve", "research_model": "research_model"},
+        {
+            "retrieve": "retrieve",
+            "research_model": "research_model",
+            "compile_notes": "compile_notes",
+        },
     )
     builder.add_edge("retrieve", END)
     builder.add_conditional_edges(
