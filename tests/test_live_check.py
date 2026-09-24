@@ -469,3 +469,14 @@ def test_writer_records_what_is_still_unsupported_after_the_retry():
     model = FakeEverything(responses=[AIMessage(content="X【1†L1】."), AIMessage(content="Still【2†L2】.")])
     out = make_writer(model=model)({"question": "Q", "research_notes": sc.NOTES, "messages": []})
     assert out["unsupported_citations"] == ["【2†L2】"]
+
+
+def test_groq_daily_limit_message_is_parsed_for_the_stop_line():
+    error = ("RateLimitError: Error code: 429 - {'error': {'message': 'Rate limit reached for model "
+             "`openai/gpt-oss-120b` ... on tokens per day (TPD): Limit 200000, Used 199939, "
+             "Requested 6726. Please try again in 47m59.28s. Need more tokens?'}}")
+    assert runner.describe_rate_limit(error) == (
+        "provider's daily token limit: used 199939 of 200000 (this call needed 6726); "
+        "the provider says retry in 47m59.28s"
+    )
+    assert runner.describe_rate_limit("some other error") is None

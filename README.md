@@ -1170,38 +1170,63 @@ Things that look odd in Studio and are deliberate:
 - A thread started in Studio has no `run_policy`, so `multi-review` refuses
   to resume it. Studio threads are for looking at, not for the CLI.
 
-### What needs a real `ANTHROPIC_API_KEY`
+### What needs a real `ANTHROPIC_API_KEY` (updated by Phase 7, Part A)
 
-Everything below is untested. The fakes fix every model reply in advance, so
-they cannot say whether a real model behaves this way:
+This list was untested when Phase 6 closed: the fakes fix every model reply in
+advance. Phase 7 Part A ran it live on **Groq, `openai/gpt-oss-120b`** (free tier),
+not on Anthropic. So each item now has one of three statuses:
 
-1. **Structured output in this configuration.** `json_schema` together with the
-   server-side-fallback beta that `get_chat_model()` sends. Check this first:
-   if it fails, every Supervisor decision falls back to the fixed policy, and
-   the log shows `proposed: None ... fallback`.
-2. **Supervisor routing quality.** Does it classify critiques correctly (evidence
-   → Researcher, writing → Writer), write briefs that actually change the
-   searches, avoid re-researching on the same brief after `nothing_found`, and
-   finish neither too early nor too late? The core claim of Phase 6.
-3. **Rationale vs. route.** Nothing checks that the rationale supports the route
-   it sits beside. It has to be read.
-4. **Researcher.** Does it write notes (not an answer) in the requested format,
-   copy URLs verbatim, write *only new* findings on a follow-up, and answer
-   `NOTHING NEW` exactly when it finds nothing?
-5. **Writer.** Does it cite only what the notes contain, say plainly when notes
-   are empty (`NO_NOTES`) rather than answering from memory, and actually
-   address the critique on a revision?
-6. **Critic.** Does it call `verify_citation` at all, distinguish evidence from
-   writing problems in its note, ignore ERROR results as instructed, and
-   approve good drafts (Phase 5's "a critic always finds something")?
-7. **Cost and latency.** Every hop is a Supervisor call. The happy path with the
-   Critic is about 3 Supervisor + 1-2 Researcher + 1 Writer + 1-2 Critic calls.
-   A revision adds roughly 3-4 more.
-8. **Real arXiv.** Whether a nonexistent id returns an empty feed (assumed) or
-   an error entry, and whether the shared 3-second throttle holds up with both
-   tools active.
-9. **Studio, visually.** The API-level checks above were run; opening the UI and
-   looking at the rendering was not (see the 6.4 report).
+- **verified on Groq**: evidence about prompts and logic, on one open model
+- **pending Anthropic**: the question is about Anthropic's API itself; Groq cannot answer it
+- **open**: tried, and the answer was "not yet"
+
+Details, per-run reports and the hand reviews are in `docs/live_check/`; start at
+`SUMMARY-groq-gpt-oss-120b.md`.
+
+1. **Structured output in this configuration** (`json_schema` + the
+   server-side-fallback beta). **Pending Anthropic.** Groq's own path works
+   (strict `json_schema` on gpt-oss), but that is a different method on a
+   different provider. Found on Groq and still to check on Anthropic: **field
+   order is not generation order**. gpt-oss writes `next` before `rationale`
+   even under strict `json_schema`, so rationale-first is a hint, not a
+   guarantee (docstring corrected in `agents/supervisor.py`).
+2. **Supervisor routing quality.** **Verified on Groq, with caveats:** 12/17
+   strict, 16/17 lenient. Single samples; 4 routes flipped between runs with
+   no targeted change, so run-to-run variance can't be separated from prompt
+   effects until Part E scores rates over repeated runs. Open design
+   question: an open gap in the notes can outrank the critique (SUP06, SUP08).
+3. **Rationale vs. route.** **Verified on Groq, and sharper than expected.** No
+   rationale argued against its own route. The real failure was a consistent
+   rationale built on a **false premise** (SUP04, SUP08): the Supervisor
+   repeated a critique's claim without checking the notes it was holding.
+   Fixed with a "check the critique against the state" instruction: 2 → 0.
+   New after the fix: **scope creep**, invented "be comprehensive"
+   requirements, 1 → 2. Scenarios now carry `premise_facts`, so a judge can
+   check a rationale against the state, not just against its route.
+4. **Researcher.** **Open.** It never ended its own search loop (5 searches,
+   then the cap). Fixed by code: the last call is made with **no tools** and
+   the results as text, so every pass ends in written notes (RES01 passes).
+   Still open: it restates facts its notes already hold instead of answering
+   `NOTHING NEW` (RES02, every run), and showing it the remaining budget did
+   not reduce its searching.
+5. **Writer.** **Verified on Groq**: 4/4. It cites only the notes, admits
+   empty notes, and drops flagged citations. Found end to end: gpt-oss writes
+   its own citation markup (`【1†L1-L7】`), which points at nothing. Now caught
+   by `unsupported_citations` (one retry, then recorded), not normalised.
+6. **Critic.** **Verified on Groq**: 6/6, twice, the second time after the
+   redesign below. It reads lookup titles (spots "Attention Is All You Need"
+   cited as RAGAS), ignores ERROR, and catches fake, malformed and
+   misattributed ids. Redesigned after E2E01: citation lookups are now code,
+   not model-invoked tool calls, so a review costs one model call.
+7. **Cost and latency.** **Measured on Groq.** A full run with the Critic cost
+   ~70k tokens and 7.5 min before the redesign (mostly per-minute rate-limit
+   waits) and delivered nothing. Without the Critic: 14k tokens, 57 s. **The
+   confirming run after the fixes is pending**: it hit Groq's daily token
+   limit mid-run (see the Phase 7 section below).
+8. **Real arXiv.** **Verified.** A well-formed id that does not exist returns an
+   empty feed, which reads as NOT FOUND, as assumed. The shared 3-second
+   throttle held with both tools active.
+9. **Studio, visually.** **Still open.** API-level checks only.
 
 ### Open going into Phase 7
 
@@ -1272,3 +1297,91 @@ Also open:
 | Stream modes and subgraph visibility | `cli.py` → `_stream_multi_agent` |
 | Pruning a small-but-unbounded transcript | `pruning.py`; `multi_agent_graph.py` (prune note) |
 | The offline Studio demo | `studio_demo.py` |
+
+## Lesson: code guards encode assumptions
+
+This project's recurring rule, since Phase 5's `should_revise`, has been
+**a code guard has the last word over the model.** The model decides quality;
+code decides when to stop, what is allowed, and what must happen. Every such
+guard was built to catch a *model* being wrong.
+
+Phase 7's first real end-to-end run (E2E01, Groq) produced the first case of a
+guard overruling a **correct** model decision:
+
+1. The Critic ran out of its call budget mid-review. It "failed closed" as a
+   rejection.
+2. The Supervisor read the situation right: *"the critic could not complete
+   verification due to budget limits … let the critic finish reviewing."*
+3. A 6.3 guard - "a rejected draft must be rewritten before it is reviewed
+   again" - overruled it and forced a rewrite of a draft nobody had faulted.
+   The Critic ran out again, the revision cap was spent, and the run delivered
+   nothing.
+
+The guard was not buggy. It did exactly what it was written to do. It
+**encoded an assumption** - *every rejection is about the content* - and that
+assumption was false the first time a rejection came from somewhere else.
+Offline tests could never have caught it, because the fakes that exercised
+the guard were written from the same assumption.
+
+What follows from it:
+
+- **A guard is a claim about the world, not a fact about the code.** "Rejected
+  means the content is bad", "the model will stop searching when it has
+  enough", "tool_choice='none' means no tool call": each is a claim a real
+  model can falsify. All three were falsified in Part A.
+- **Test guards against real model behaviour, not only against fakes.** A fake
+  built from the guard's assumption can only confirm it.
+- **When code and model disagree, look at which one was right before trusting
+  either.** The log (`supervisor_log`: proposed vs. routed, override reason,
+  rationale) is what made E2E01 diagnosable in minutes.
+- **Separate facts from judgements, and give each to the side that is good at
+  it.** The fixes that held all move a *mechanical* step into code
+  (citation lookups, the Researcher's final call) and leave the model only the
+  judgement. The fix that did not hold (`tool_choice="none"`) asked the model
+  to obey a constraint.
+- **Distinguish "could not finish" from "decided no".** The Critic now returns
+  `incomplete` for the first. It is not an approval, and it no longer spends a
+  revision or forces a rewrite.
+
+This applies directly ahead: **Part D** adds retry and fallback rules, each of
+which assumes something about why a call failed. **Part E**'s evaluators will
+encode what "correct" means. A wrong evaluator does not fail loudly: it scores
+confidently. Both need checking against real behaviour, the way this guard
+finally was.
+
+## Phase 7: Production (in progress)
+
+Phase 7 is building "production" in a specific sense: *we now know whether
+this works*, not just "it's wrapped in an API". Part A comes first because
+every later part (streaming, retries, evaluation, deployment) would otherwise
+be built on unverified claims.
+
+### Part A: live verification
+
+- **Provider switch.** `get_chat_model()` builds Anthropic (default) or Groq
+  (`--provider groq`, or `RESEARCH_COPILOT_PROVIDER`). Structured output is
+  provider-aware (`models.structured_output_kwargs`): `json_schema` on
+  Anthropic and on Groq's gpt-oss/Qwen models (strict), tool calling on Groq's
+  Llama models. Llama 3.3 70B turned out not to be on Groq's free tier; the
+  pass ran on `openai/gpt-oss-120b`.
+- **The harness** (`research-copilot live-check list | run | report`):
+  - 35 labelled scenarios, with each expectation written before the model ran
+  - pacing under the provider's per-minute limit, resumable runs, re-running
+    of errored scenarios
+  - Anthropic-only items recorded as PENDING, never inferred
+  - a two-axis report: route, scored by code, beside rationale, judged against
+    the state by a person
+  - `to_dataset_example()` already emits the shape Part E will upload
+- **Results:** item by item in the updated list above, and in
+  `docs/live_check/SUMMARY-groq-gpt-oss-120b.md`.
+- **Fixes that came out of it:**
+  - `resilience.py`: one retry with a hint, then a degraded result
+  - the Researcher's reserved final call, with no tools
+  - the Supervisor's premise check
+  - the Critic's code-side lookups and `incomplete` verdict
+  - the Writer's unsupported-citation check
+- **Provider limits are the provider's to report.** Groq's per-day limit
+  refills continuously, is shared across everything using the key, and counted
+  fewer tokens than our records (cached input likely excluded). The harness's
+  budget caps a run; Groq's 429 is the only authority on what is left, and the
+  runner now parses it into one line.

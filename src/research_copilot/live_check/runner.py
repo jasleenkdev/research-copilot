@@ -106,8 +106,33 @@ def _append(path: Path, record: dict) -> None:
 
 
 def tokens_today(results: dict[str, dict]) -> int:
+    """Tokens this results file recorded today (UTC). A local ceiling only.
+
+    CONCEPT (Phase 7 A1): the provider's counter is the authority, not ours
+    Found by running out. On Groq's free tier the per-day limit is not a
+    calendar day and not a sum we can reproduce: it refills continuously
+    (a 429 said "try again in 48m" for 6.7k tokens), it is shared by every
+    results file and every other use of the key, and it counted ~200k where
+    our records summed ~333k (cached input probably does not count). So the
+    budget here caps what *this run* may spend. Whether the provider will
+    serve it is only known from its 429, which `run` parses and reports.
+    """
     today = datetime.now(timezone.utc).date().isoformat()
     return sum(r.get("tokens", 0) for r in results.values() if str(r.get("at", "")).startswith(today))
+
+
+_TPD = re.compile(r"tokens per day \(TPD\): Limit (\d+), Used (\d+), Requested (\d+)\. Please try again in ([\dhms.]+)")
+
+
+def describe_rate_limit(error: str) -> str | None:
+    """Turn Groq's per-day 429 into one line: used / limit, and when to retry."""
+    match = _TPD.search(error or "")
+    if not match:
+        return None
+    limit, used, requested, retry = match.groups()
+    retry = retry.rstrip(".")
+    return (f"provider's daily token limit: used {used} of {limit} (this call needed {requested}); "
+            f"the provider says retry in {retry}")
 
 
 # ----------------------------------------------------------------- pacing
@@ -474,7 +499,9 @@ def run(
             + (f" - {error}" if error else ""))
 
         if error and ("429" in error or "rate" in error.lower()):
+            detail = describe_rate_limit(error)
             log("[stop] rate limited even after the SDK's retries; stopping so the "
-                "remaining scenarios are not burned against a closed window.")
+                "remaining scenarios are not burned against a closed window."
+                + (f"\n       {detail}" if detail else ""))
             break
     return results
