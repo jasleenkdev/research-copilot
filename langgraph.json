@@ -3,7 +3,8 @@
   "dependencies": ["."],
   "graphs": {
     "research_copilot": "./src/research_copilot/graph.py:make_graph",
-    "prebuilt": "./src/research_copilot/prebuilt.py:make_graph"
+    "prebuilt": "./src/research_copilot/prebuilt.py:make_graph",
+    "multi_agent": "./src/research_copilot/multi_agent_graph.py:make_graph"
   },
   "env": ".env"
 }

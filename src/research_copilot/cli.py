@@ -34,6 +34,15 @@ Phase 5 adds no commands, only flags on the graph commands:
 That there is no new command is the point. Reflection is not a different way of
 using the system, it is more edges inside the same graph, so it shows up as
 flags on the commands that already run it.
+
+Phase 6 (step 6.1) adds one command, and here a new command *is* right:
+  multi-agent     the same question answered by a Researcher agent and a Writer
+                  agent in a separate graph (multi_agent_graph.py), with the
+                  hand-offs printed as they happen
+
+It is a new command, not a flag on `graph-agent`, because it is a different
+graph with a different State, not more edges inside the old one. Phase 5's
+graph stays reachable, unchanged, through `graph-agent`.
 """
 
 import argparse
@@ -64,6 +73,10 @@ from research_copilot.graph import (
     pending_interrupt,
     resume_graph,
     run_graph,
+)
+from research_copilot.multi_agent_graph import (
+    build_multi_agent_graph,
+    multi_agent_turn_input,
 )
 from research_copilot.prebuilt import build_prebuilt_agent, run_prebuilt_agent
 from research_copilot.retrieval import (
@@ -736,8 +749,16 @@ def cmd_draw_graph(which: str) -> None:
     has to be set: building the graph constructs the ChatAnthropic object (to
     bind the tools to it), and the factory checks for a key at that point.
     """
-    graph = build_graph() if which == "graph" else build_prebuilt_agent()
-    drawn = graph.get_graph()
+    if which == "multi":
+        # PHASE 6: xray=True expands subgraphs, so the Researcher's internal
+        # loop is drawn inside it. Without it, the Researcher is one box, which
+        # is how the parent graph actually sees it. Studio shows the same two
+        # views: collapsed by default, expandable on click.
+        graph = build_multi_agent_graph()
+        drawn = graph.get_graph(xray=True)
+    else:
+        graph = build_graph() if which == "graph" else build_prebuilt_agent()
+        drawn = graph.get_graph()
 
     print("--- nodes ---")
     for node in drawn.nodes:
@@ -757,6 +778,142 @@ def cmd_draw_graph(which: str) -> None:
         print(drawn.draw_ascii())
     except ImportError:
         print("(install grandalf for ASCII art: pip install grandalf)")
+
+
+# --- Phase 6: multi-agent -----------------------------------------------------
+
+
+def _describe_update(node: str, update: dict) -> str:
+    """One line summarising what a node just wrote. Used for the hand-off trace."""
+    if not update:
+        return "(no change)"
+    parts = []
+    for key, value in update.items():
+        if isinstance(value, str):
+            text = " ".join(value.split())
+            parts.append(f"{key}={text[:60]!r}" + ("..." if len(text) > 60 else ""))
+        elif isinstance(value, list):
+            parts.append(f"{key}=[{len(value)}]")
+        else:
+            parts.append(f"{key}={value!r}")
+    return ", ".join(parts)
+
+
+def cmd_multi_agent(
+    question: str,
+    mode: str,
+    *,
+    max_research_iterations: int,
+    plan: bool = False,
+) -> None:
+    """One question through Researcher -> Writer, with every hand-off printed.
+
+    CONCEPT: streaming with subgraphs=True
+    `.invoke()` returns only the final state, which for this graph hides the
+    very thing 6.1 is about. So this command streams instead. With
+    `subgraphs=True`, every event carries a *namespace*: `()` for a step of the
+    parent graph, and `("researcher:<task-id>",)` for a step *inside* the
+    Researcher subgraph. The trace below indents the inner steps. You can
+    watch the private tool loop run, and then see that none of it appears in
+    the final state's `messages`.
+
+    CONCEPT: which stream modes can see inside a subgraph's private state
+    Found while building this, and worth knowing before you trust a trace. For
+    a *nested* subgraph, the "updates" and "values" stream modes are narrowed
+    to the subgraph's output schema. A Researcher step that wrote only
+    `research_messages` shows up there as an empty update, as if it had done
+    nothing. The "tasks" mode (and "debug", which wraps it) reports each
+    task's full write, private keys included. So this trace uses three modes:
+
+        "updates"   parent-level steps: what each agent handed over
+        "tasks"     steps inside a subgraph: everything they wrote, private
+                    channel included
+        "values"    the parent's final state, the same dict `.invoke()`
+                    would have returned
+
+    The privacy boundary is therefore a *state* boundary, not a visibility
+    boundary. The tool loop is kept out of other agents' inputs and out of the
+    checkpoint, but a developer holding the stream can still watch it.
+    """
+    if mode == "knowledge-base" and _warn_if_empty_store():
+        return
+
+    graph = build_multi_agent_graph(
+        max_research_iterations=max_research_iterations,
+        enable_planning=plan,
+    )
+
+    state: dict = {}
+    print("--- hand-offs ---", file=sys.stderr)
+    for namespace, stream_mode, payload in graph.stream(
+        multi_agent_turn_input(question, mode),
+        stream_mode=["updates", "tasks", "values"],
+        subgraphs=True,
+    ):
+        if stream_mode == "values":
+            if not namespace:
+                state = payload
+        elif stream_mode == "tasks" and namespace and "result" in payload:
+            # A finished step inside an agent's subgraph. (A "tasks" event
+            # without "result" is the step *starting*.) The namespace's first
+            # segment is "<parent node>:<task id>", and only the node name is
+            # worth printing.
+            agent = namespace[0].split(":", 1)[0]
+            result = payload["result"] if isinstance(payload["result"], dict) else {}
+            print(
+                f"    [{agent}/{payload['name']}] {_describe_update(payload['name'], result)}",
+                file=sys.stderr,
+            )
+        elif stream_mode == "updates" and not namespace:
+            for node, update in payload.items():
+                print(f"  [{node}] {_describe_update(node, update or {})}", file=sys.stderr)
+    print("--- end hand-offs ---", file=sys.stderr)
+
+    print(final_answer(state))
+    _print_multi_agent_state(state)
+
+
+def _print_multi_agent_state(state: dict) -> None:
+    """The final state, grouped by owner - the same grouping as MultiAgentState."""
+    print("\n--- final state (by owner) ---", file=sys.stderr)
+    print(f"  question:            {state.get('question')}", file=sys.stderr)
+    print(f"  mode:                {state.get('mode')}", file=sys.stderr)
+    if state.get("sub_questions"):
+        print(f"  plan_question  -> sub_questions: {len(state['sub_questions'])}", file=sys.stderr)
+        for i, sub_question in enumerate(state["sub_questions"], start=1):
+            print(f"    [{i}] {sub_question}", file=sys.stderr)
+    notes = " ".join((state.get("research_notes") or "").split())
+    print(
+        f"  researcher     -> research_notes: {notes[:70]!r}"
+        + ("..." if len(notes) > 70 else "")
+        + ("  (EMPTY - the Researcher found nothing)" if not notes else ""),
+        file=sys.stderr,
+    )
+    print(f"                    research_iterations: {state.get('research_iterations', 0)}", file=sys.stderr)
+    documents = state.get("documents") or []
+    if documents:
+        print(f"                    documents: {len(documents)} retrieved", file=sys.stderr)
+        for i, document in enumerate(documents, start=1):
+            print(f"      [{i}] {describe_source(document)}", file=sys.stderr)
+    draft = " ".join((state.get("draft") or "").split())
+    print(f"  writer         -> draft: {draft[:70]!r}" + ("..." if len(draft) > 70 else ""), file=sys.stderr)
+    messages = state.get("messages", [])
+    print(f"  finalize_answer-> messages: {len(messages)}", file=sys.stderr)
+    for message in messages:
+        preview = " ".join(message.text.split())
+        if len(preview) > 70:
+            preview = preview[:70] + "..."
+        print(f"    {message.type:>6}: {preview}", file=sys.stderr)
+    # The Phase 6 invariant, printed rather than assumed: the Researcher's
+    # private tool traffic must not be in the shared transcript.
+    leaked = [m for m in messages if m.type == "tool" or getattr(m, "tool_calls", None)]
+    if leaked:
+        print(
+            f"  [warning] {len(leaked)} tool message(s) in the shared transcript - "
+            "the Researcher's private channel leaked",
+            file=sys.stderr,
+        )
+    print("--- end state ---", file=sys.stderr)
 
 
 def _report_tracing() -> None:
@@ -864,7 +1021,7 @@ def _add_phase5_flags(parser: argparse.ArgumentParser) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="research-copilot", description="Research Copilot (Phases 1-5)"
+        prog="research-copilot", description="Research Copilot (Phases 1-6)"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1038,7 +1195,34 @@ def main(argv: list[str] | None = None) -> int:
         "draw-graph", help="Print a graph's structure without running it"
     )
     draw_parser.add_argument(
-        "which", nargs="?", choices=["graph", "prebuilt"], default="graph"
+        "which", nargs="?", choices=["graph", "prebuilt", "multi"], default="graph"
+    )
+
+    # --- Phase 6 ---
+    multi_parser = subparsers.add_parser(
+        "multi-agent",
+        help="Researcher agent -> Writer agent, with hand-offs printed (Phase 6.1)",
+    )
+    multi_parser.add_argument("question")
+    multi_parser.add_argument(
+        "--mode",
+        choices=["knowledge-base", "live-search"],
+        default="live-search",
+        help=(
+            "How the Researcher gathers evidence. knowledge-base: retrieval "
+            "from ingested docs. live-search: its own arXiv tool loop."
+        ),
+    )
+    multi_parser.add_argument(
+        "--max-research-iterations",
+        type=int,
+        default=6,
+        help="Cap on the Researcher's private tool loop (its model calls)",
+    )
+    multi_parser.add_argument(
+        "--plan",
+        action="store_true",
+        help="Decompose the question first (Phase 5's planner, unchanged)",
     )
 
     args = parser.parse_args(argv)
@@ -1111,6 +1295,13 @@ def main(argv: list[str] | None = None) -> int:
             cmd_prebuilt_agent(args.question)
         elif args.command == "draw-graph":
             cmd_draw_graph(args.which)
+        elif args.command == "multi-agent":
+            cmd_multi_agent(
+                args.question,
+                args.mode,
+                max_research_iterations=args.max_research_iterations,
+                plan=args.plan,
+            )
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

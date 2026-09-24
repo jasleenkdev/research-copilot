@@ -31,7 +31,12 @@ next, not to ship the final system as fast as possible.
   planning node that splits the question into sub-questions before research.
 - [ ] **Phase 6: Multi-agent.** Researcher, Writer, and Critic nodes coordinated
   by a Supervisor that routes on structured LLM output. Each agent has its own
-  tools and system prompt.
+  tools and system prompt. Built in four reviewed steps:
+  - [x] 6.1 Researcher (subgraph, private tool loop) → Writer (node), fixed
+    hand-off, one owner per state field
+  - [ ] 6.2 Supervisor routing via structured output
+  - [ ] 6.3 Critic agent with its own tools; per-agent budgets
+  - [ ] 6.4 CLI flags (`--critic`/`--approve`/`--plan`), threads, Studio
 - [ ] **Phase 7: Production.** Streaming via `astream_events`, per-node error
   handling, retries and fallback models, LangSmith dataset evaluation, and a
   FastAPI wrapper around the compiled graph (or LangGraph Studio).
@@ -828,3 +833,87 @@ to see exactly what changed.
 | Decomposition, and declining to decompose | `graph.py` → `plan_question`; `prompts.py` → `PLAN_PROMPT` |
 | Config a resume must repeat (closures vs State) | `cli.py` → `cmd_review` |
 | What Phase 6 needs on top of this | `graph.py` (bottom, PHASE 6 NOTE) |
+
+## Usage (Phase 6.1)
+
+Phase 5's `call_model` did two jobs: it looked things up, and it wrote the
+answer. 6.1 gives each job to its own agent, in a new graph
+(`multi_agent_graph.py`) beside the old one. `graph-agent` still runs Phase 5's
+graph, unchanged.
+
+```bash
+research-copilot multi-agent "How are RAG pipelines evaluated?"
+research-copilot multi-agent "What do my notes say about chunking?" --mode knowledge-base
+research-copilot multi-agent "Compare RAG and long-context models on cost" --plan
+research-copilot multi-agent "..." --max-research-iterations 2   # watch the budget fallback
+research-copilot draw-graph multi     # xray view: the Researcher's inside is drawn
+```
+
+The command prints every hand-off as it happens. Steps inside the Researcher's
+subgraph are indented:
+
+```
+--- hand-offs ---
+  [plan_question] (no change)
+    [researcher/research_model] research_messages=[1], research_iterations=1
+    [researcher/research_tools] research_messages=[1]
+    [researcher/research_model] research_messages=[1], research_iterations=2
+    [researcher/compile_notes] research_notes='Findings: ...'
+  [researcher] research_notes='Findings: ...', research_iterations=2
+  [writer] draft='...'
+  [finalize_answer] messages=[1]
+```
+
+Notice that `research_messages` appears only on the indented lines. The final
+state's `messages` holds exactly one question and one answer.
+
+### The shape
+
+```
+START → plan_question → [researcher subgraph] → writer → finalize_answer → END
+                          ├ knowledge-base: retrieve
+                          └ live-search:    research_model ⇄ research_tools → compile_notes
+```
+
+Every edge is fixed. 6.2 replaces the middle ones with a Supervisor.
+
+### One field, one owner
+
+| Field | Owner | Enforced by |
+| --- | --- | --- |
+| `sub_questions` | `plan_question` | `owns()` wrapper |
+| `research_notes`, `documents`, `research_iterations` | `researcher` | the subgraph's `output_schema` |
+| `draft` | `writer` | `owns()` wrapper |
+| `messages` | `finalize_answer` | `owns()` wrapper |
+| everything above, between turns | the turn boundary (`multi_agent_turn_input`) | — |
+
+A node that returns a key it does not own raises `OwnershipError`.
+
+### Subgraph vs. node
+
+The Researcher is a subgraph because it has a loop (search → read → search) and
+scratch work nobody else should read. The Writer is a plain node because it
+makes one model call with no tools. The rule: **promote an agent to a subgraph
+when it has a loop or state of its own, not because it is "an agent".**
+
+The Researcher's tool loop goes to a private `research_messages` channel. It is
+kept out of the shared transcript, out of the Writer's input, and out of
+`get_state()`. It is **not** kept off the disk: the subgraph checkpoints under
+its own namespace (`researcher:<task-id>`), and those checkpoints hold every
+search result.
+
+## Where each Phase 6 concept lives
+
+| Concept | File |
+| --- | --- |
+| Why one `draft` field breaks with several agents | `multi_agent_state.py` (module docstring) |
+| One field, one owner, and how it is enforced | `multi_agent_state.py` → `OWNERS`, `owns` |
+| The turn boundary as the one non-owner writer | `multi_agent_state.py`; `multi_agent_graph.py` → `multi_agent_turn_input` |
+| `input_schema` / `output_schema` as an agent's contract | `multi_agent_state.py` → `ResearcherInput`, `ResearcherOutput` |
+| An agent as a subgraph | `agents/researcher.py` (module docstring) |
+| The private message channel, and its limit (disk) | `agents/researcher.py`; `tests/test_multi_agent.py` |
+| Why the Writer is a node, not a subgraph | `agents/writer.py` (module docstring) |
+| An agent must always hand something over | `agents/researcher.py` → `compile_notes` |
+| Telling the Writer "nothing was found" explicitly | `agents/writer.py` → `NO_NOTES` |
+| Which stream modes see inside a subgraph | `cli.py` → `cmd_multi_agent` |
+| Per-invocation vs. per-revision agent budgets (for 6.3) | `multi_agent_graph.py` (bottom note) |
