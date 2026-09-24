@@ -391,6 +391,20 @@ def build_multi_agent_graph(
             return {"messages": [AIMessage(content=f"(draft withheld{spent} - {reason})")]}
 
         text = (state.get("human_edit") or "").strip() or (state.get("draft") or "").strip()
+        if (
+            text
+            and enable_critic
+            and critique_is_current(state)
+            and state.get("verdict") == "incomplete"
+        ):
+            # Phase 7: the Critic was on but its latest review of this draft
+            # could not finish, and there was no budget left to try again. The
+            # draft is delivered - withholding it is what E2E01 did, and it
+            # delivered nothing - but it is never presented as reviewed.
+            text = (
+                "(Note: this answer was not checked by the reviewer - the review "
+                "could not be completed.)\n\n" + text
+            )
         return {"messages": [AIMessage(content=text or "(the Writer produced no answer)")]}
 
     def route_from_supervisor(state: MultiAgentState) -> str:
@@ -442,6 +456,12 @@ def build_multi_agent_graph(
         """
         if state.get("verdict") == "approve":
             return "review_draft" if require_approval else "finalize_answer"
+        if state.get("verdict") == "incomplete":
+            # Phase 7: a review that could not finish is not a rejection. No
+            # revision is spent and nothing is rewritten; the Supervisor decides
+            # (send the Critic again, or finish). The Critic's per-turn dispatch
+            # cap bounds the retries, so this cannot loop.
+            return "supervisor"
         if state.get("revisions", 0) >= max_revisions:
             return "finalize_answer"
         return "start_revision"
@@ -529,6 +549,7 @@ def build_multi_agent_graph(
             "review_draft": "review_draft",
             "start_revision": "start_revision",
             "finalize_answer": "finalize_answer",
+            "supervisor": "supervisor",  # Phase 7: incomplete reviews
         },
     )
     builder.add_conditional_edges(
@@ -593,6 +614,7 @@ def per_turn_reset() -> dict:
         "research_iterations": 0,
         "research_outcome": "",
         "draft": "",
+        "unsupported_citations": [],
         "researcher_brief": "",
         "next_agent": "",
         "dispatches": {},

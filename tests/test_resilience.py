@@ -131,13 +131,15 @@ def test_critic_recovers_after_one_invented_tool_call():
     out = build_critic(model=model, tools=[verify]).invoke(critic_input())
     assert out["verdict"] == "approve"
     assert out["budgets"]["critic"]["used"] == 2
+    assert out["citation_checks"] == [{"arxiv_id": "2309.15217", "status": "found"}]
 
 
-def test_critic_that_fails_twice_fails_closed():
+def test_critic_that_fails_twice_is_incomplete_not_rejected():
+    """Phase 7: "did not finish" is not "rejected" (E2E01). Still not approved."""
     model = ScriptedModel(RuntimeError(GROQ_ERROR), RuntimeError(GROQ_ERROR))
     out = build_critic(model=model, tools=[verify]).invoke(critic_input())
-    assert out["verdict"] == "reject"
-    assert "model failed before reaching a verdict" in out["critique"]
+    assert out["verdict"] == "incomplete"
+    assert "could not finish its review" in out["critique"]
 
 
 # --- the Supervisor's premise-checking instruction ------------------------------------------

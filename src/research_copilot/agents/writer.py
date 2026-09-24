@@ -62,10 +62,13 @@ and writes only that entry. See BUDGET_ENTRY_OWNERS.
 """
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+
+import re
 
 from research_copilot.models import get_chat_model
 from research_copilot.multi_agent_state import MultiAgentState, budget_of
+from research_copilot.tools.citations import extract_citations
 # Phase 5's revision instruction, reused verbatim: the Writer is the node that
 # inherits call_model's revising half, so it inherits the prompt too.
 from research_copilot.prompts import REVISION_INSTRUCTIONS
@@ -108,6 +111,49 @@ NO_NOTES = (
     "(The Researcher found nothing usable for this question. Tell the user that "
     "no supporting evidence was found, and do not answer from memory.)"
 )
+
+
+# --------------------------------------------------------------------------
+# Phase 7 A1: citations that do not come from the notes
+# --------------------------------------------------------------------------
+# CONCEPT: a check, not a normaliser
+# On Groq, gpt-oss-120b wrote its own citation markup into a user-facing answer
+# - `【1†L1-L7】`, a reference into a browsing tool it does not have here. It
+# points at nothing the user can check, and the Writer's rule ("cite exactly
+# as the notes give them") did not stop it. Nothing noticed.
+#
+# The fix is deliberately narrow: detect citations that cannot be traced to the
+# notes, give the Writer one retry that names them, and record what is left in
+# `unsupported_citations`. It does not rewrite citation formats. Full
+# normalisation is a separate, later decision. What matters now is that bad
+# output is no longer *silent*.
+_MARKUP = re.compile(r"【([^】]*)】")
+_BRACKET = re.compile(r"(?<!\w)\[(\d+)\]")
+_EXCERPT_NUMBER = re.compile(r"^\[(\d+)\]", re.MULTILINE)
+
+UNSUPPORTED_CITATIONS_NOTE = (
+    "Your draft cites things that do not come from the research notes: {items}. "
+    "Rewrite the draft citing only sources the notes contain, exactly as the "
+    "notes give them (the arXiv URL or id, or [n] for numbered excerpts). Remove "
+    "any other citation or reference marker."
+)
+
+
+def unsupported_citations(draft: str, notes: str, *, mode: str = "live-search") -> list[str]:
+    """Citations in `draft` that cannot be traced to `notes`, as readable strings."""
+    notes_ids = set(extract_citations(notes))
+    issues: list[str] = []
+    for cited in extract_citations(draft):
+        if cited not in notes_ids:
+            issues.append(f"arXiv {cited}")
+    for inner in dict.fromkeys(_MARKUP.findall(draft or "")):
+        if not (set(extract_citations(inner)) & notes_ids):
+            issues.append(f"【{inner}】")
+    if mode == "knowledge-base":
+        excerpts = {int(n) for n in _EXCERPT_NUMBER.findall(notes or "")}
+        for n in sorted({int(n) for n in _BRACKET.findall(draft or "")} - excerpts):
+            issues.append(f"[{n}] (no excerpt [{n}] in the notes)")
+    return issues
 
 
 def revision_instruction(state: MultiAgentState, max_revisions: int) -> list[BaseMessage]:
@@ -212,10 +258,28 @@ def make_writer(
             content=f"Research notes:\n{notes}\n\nQuestion: {state.get('question', '')}"
         )
 
-        ai_message = writer_model().invoke([*instructions, *history, final_turn])
-        used = budget_of(state, "writer", max_calls)["used"] + 1
-        # The Writer's fields: its draft, and its own budget entry.
-        # `owns("writer")` checks both, the entry included.
-        return {"draft": ai_message.text, "budgets": {"writer": {"used": used, "cap": max_calls}}}
+        request = [*instructions, *history, final_turn]
+        draft = writer_model().invoke(request).text
+        calls = 1
+
+        # Phase 7: one retry, naming the citations that do not come from the
+        # notes. The same shape as resilience.py's recovery - a specific hint,
+        # once - applied to bad *output* rather than a failed *call*.
+        issues = unsupported_citations(draft, notes if notes != NO_NOTES else "", mode=mode)
+        if issues:
+            retry = [*request, AIMessage(content=draft),
+                     HumanMessage(content=UNSUPPORTED_CITATIONS_NOTE.format(items="; ".join(issues)))]
+            draft = writer_model().invoke(retry).text
+            calls = 2
+            issues = unsupported_citations(draft, notes if notes != NO_NOTES else "", mode=mode)
+
+        used = budget_of(state, "writer", max_calls)["used"] + calls
+        # The Writer's fields: its draft, what is still unsupported in it, and
+        # its own budget entry. `owns("writer")` checks all three.
+        return {
+            "draft": draft,
+            "unsupported_citations": issues,
+            "budgets": {"writer": {"used": used, "cap": max_calls}},
+        }
 
     return write_draft

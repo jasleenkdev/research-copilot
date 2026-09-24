@@ -141,3 +141,33 @@ def parse_check(tool_output: str) -> str:
         "NOT FOUND": "not_found",
         "INVALID": "invalid",
     }.get(head, "error")
+
+
+# Phase 7 A1: citations are now extracted and checked by code before the
+# Critic judges (agents/critic.py). These find every arXiv reference a draft
+# makes: bare ids, arxiv.org URLs, "arXiv:" prefixes - and malformed
+# "arXiv:12345"-style references, which must reach the checker so they come
+# back INVALID rather than being silently skipped.
+_CITED = re.compile(
+    r"arxiv\.org/(?:abs|pdf)/(?P<url>[^\s\]\)\},;]+?)(?:\.pdf)?(?=[\s\]\)\},;]|$)"
+    r"|arXiv:\s*(?P<prefixed>[^\s\]\)\},;]+)"
+    r"|\b(?P<bare>\d{4}\.\d{4,5}(?:v\d+)?)\b",
+    re.IGNORECASE,
+)
+
+MAX_CITATIONS_CHECKED = 10
+
+
+def extract_citations(text: str) -> list[str]:
+    """Every arXiv reference in `text`, in order of first appearance, one per
+    paper (versions and URL/id duplicates collapse to one). Capped, because each
+    lookup waits on arXiv's 3-second throttle."""
+    seen: set[str] = set()
+    found: list[str] = []
+    for match in _CITED.finditer(text or ""):
+        raw = (match.group("url") or match.group("prefixed") or match.group("bare") or "").rstrip(".")
+        key = normalize_arxiv_id(raw) or raw
+        if key and key not in seen:
+            seen.add(key)
+            found.append(key)
+    return found[:MAX_CITATIONS_CHECKED]

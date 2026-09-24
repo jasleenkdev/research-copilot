@@ -65,19 +65,54 @@ per-round budget while still verifying, with no verdict written. That is also
 a rejection, with a critique saying so, for Phase 5's reason: an approval gate
 must never read "did not finish" as "approved". The cost is a revision round,
 and `max_revisions` bounds it.
+
+--------------------------------------------------------------------------
+PHASE 7 A1: citations are checked by code, and "did not finish" is its own verdict
+--------------------------------------------------------------------------
+The loop above - model decides to call verify_citation, one id per call -
+failed its first real end-to-end run (Groq gpt-oss-120b, E2E01). The model
+checked one citation per call, a draft with three citations used the whole
+4-call budget before any verdict, and the review "failed closed" as a
+rejection. Twice. The draft was withheld, and nothing was delivered.
+
+Two corrections, both applied here:
+
+CONCEPT: a mechanical lookup is not the model's to invoke
+Whether arXiv has a paper with id 2309.15217 is a lookup, not a judgement.
+Letting the model decide *whether* and *when* to make it only adds ways to get
+it wrong: it can skip a citation, check one per call and run out of budget,
+or call a tool that does not exist. So `verify_citations` - a plain code node
+- extracts every arXiv reference from the draft and checks each one before the
+model is called. The model receives the results as facts, and makes one
+judging call with no tools at all. It is the same principle as the
+Researcher's reserved final call: when something must happen, code makes it
+happen, and the model is left with only the part that needs judgement.
+
+CONCEPT: "incomplete" is not "rejected"
+6.3 made every "did not finish" a rejection, on Phase 5's fail-closed rule.
+The rule's premise - never read "did not finish" as "approved" - still holds.
+Its implementation was wrong: a rejection spends a revision and, through the
+Supervisor's guards, forces a rewrite of a draft nobody faulted. E2E01's
+Supervisor saw exactly that ("let the critic finish reviewing"), and the
+guard overruled it. So a review that could not finish now returns
+`verdict="incomplete"`. It is still not an approval (nothing finishes on it
+as reviewed), but it spends no revision and forces no rewrite. See
+`after_critique` in multi_agent_graph.py.
+
+A garbled verdict is still a rejection. The model *finished* and said
+something unreadable; Phase 5's parser fails closed on that, unchanged.
 """
 
 from collections.abc import Sequence
 from typing import Annotated
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
-from research_copilot.agent_loop import _execute_tool_call
 from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
 # Phase 5's parsers, imported rather than copied: one definition of what a
 # verdict is, shared by the Phase 5 critic, the Phase 4 human gate, and this
@@ -85,15 +120,17 @@ from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, 
 from research_copilot.graph import _parse_critique, _parse_verdict
 from research_copilot.models import get_chat_model
 from research_copilot.multi_agent_state import CriticInput, CriticOutput, budget_of
-from research_copilot.tools.citations import parse_check, verify_citation
+from research_copilot.tools.citations import extract_citations, parse_check, verify_citation
 
-# The Critic's per-round model-call budget. Small: a Critic verifies what the
-# draft cites and decides, and it does not explore.
+# The Critic's per-round model-call budget. Since Phase 7 each review costs one
+# model call (the lookups are code), so 4 allows a retry after a failed call and
+# more than one review in a round.
 DEFAULT_MAX_CRITIC_ITERATIONS = 4
 
-# Phase 5's CRITIC_PROMPT with three additions: the research notes, the tool,
-# and how to read the tool's failures. The first-line format is unchanged,
-# because `_parse_critique` still reads it.
+# Phase 5's CRITIC_PROMPT with the research notes added. Since Phase 7 the
+# citation checks are done by code and handed over as facts, so the prompt says
+# how to read them instead of asking the model to run them. The first-line
+# format is unchanged, because `_parse_critique` still reads it.
 CRITIC_AGENT_PROMPT = (
     "You are the Critic on a small research team. A Writer drafted an answer "
     "from notes a Researcher gathered. You are not rewriting it - you are "
@@ -102,12 +139,14 @@ CRITIC_AGENT_PROMPT = (
     "- Does it actually answer the question that was asked?\n"
     "- Is every claim supported by the research notes? A claim the notes do not "
     "contain is unsupported, however plausible.\n"
-    "- Are the sources real? Use verify_citation on each arXiv id or URL the "
-    "draft cites. A NOT FOUND or INVALID result means the citation is wrong. An "
-    "ERROR result means the lookup failed - it is not evidence either way; do "
-    "not reject a draft because of it.\n"
+    "- Are the sources real and right? Every arXiv reference in the draft has "
+    "already been looked up for you; the results are below and are facts. FOUND "
+    "gives the paper's real title - check it matches what the draft says the "
+    "paper is. NOT FOUND or INVALID means the citation is wrong. ERROR means the "
+    "lookup failed - it is not evidence either way; do not reject a draft "
+    "because of it.\n"
     "- Is speculation labelled as speculation?\n\n"
-    "Verify, then reply in exactly this format:\n"
+    "Reply in exactly this format:\n"
     "First line: APPROVE or REJECT, alone on the line.\n"
     "Then, if you rejected it, say what is wrong in concrete terms someone can "
     "act on. Say whether the problem is *evidence* (a source is missing, fake, or "
@@ -116,40 +155,42 @@ CRITIC_AGENT_PROMPT = (
     "is badly organised). Name the claim, the citation, or the part of the "
     "question. A note nobody can act on wastes a revision.\n\n"
     "Approve a draft that is good enough. Holding out for perfect costs "
-    "revisions and gets you nothing.\n\n"
-    # Phase 7: the same line the Researcher got, for the same reason.
-    "verify_citation is your only tool. You cannot open URLs, files, or web pages."
+    "revisions and gets you nothing. Judge the draft against the question as "
+    "asked - do not require topics the question did not ask about.\n\n"
+    "You have no tools. Everything you need is in this message."
 )
 
-# Phase 7: same hint as the Researcher's, for the Critic's one tool.
 INVALID_TOOL_NOTE = (
-    "Your previous reply tried to call a tool that does not exist. The only tool "
-    "you have is verify_citation. Either call it on an arXiv id, or give your "
-    "verdict now."
+    "Your previous reply tried to call a tool. You have no tools: every citation "
+    "has already been checked, and the results are in the message. Give your "
+    "verdict now, in the required format."
 )
 
+# The two ways a review can fail to finish. Both are `incomplete`, not reject.
 MODEL_ERROR_CRITIQUE = (
-    "The Critic's model failed before reaching a verdict ({error}). Treated as a "
-    "rejection (fail closed)."
+    "The Critic could not finish its review: its model failed ({error}). This says "
+    "nothing about the draft."
 )
-
 OUT_OF_BUDGET_CRITIQUE = (
-    "The Critic ran out of its verification budget ({used} of {cap} model calls) "
-    "before reaching a verdict. Treated as a rejection (fail closed). Citations "
-    "checked so far: {checked}."
+    "The Critic could not finish its review: its round budget ({used} of {cap} "
+    "model calls) was already spent. This says nothing about the draft."
 )
 
 
 class CriticState(CriticInput, CriticOutput, total=False):
     """Read contract + write contract + the private keys below."""
 
-    # The private verification loop. Named apart from `messages` for the same
-    # reason as `research_messages`: the name is the first protection, and
-    # CriticOutput is the second.
+    # The Critic's own exchange with its model: the judging request's reply.
+    # Named apart from `messages` for the same reason as `research_messages`:
+    # the name is the first protection, and CriticOutput is the second.
     critic_messages: Annotated[list[BaseMessage], add_messages]
+    # Phase 7: the raw lookup results, as the verifier returned them. Private
+    # for the same reason as critic_messages - the Writer gets the Critic's
+    # judgement, not "NOT FOUND: ..." strings - and, like it, checkpointed under
+    # the critic's namespace.
+    lookups: list[str]
     # Model calls in *this* invocation. The round total lives in
-    # `budgets["critic"]`. This one is private, because only the loop's own
-    # stopping rule needs it.
+    # `budgets["critic"]`.
     critic_iterations: int
 
 
@@ -159,15 +200,20 @@ def build_critic(
     tools: Sequence[BaseTool] | None = None,
     max_iterations: int = DEFAULT_MAX_CRITIC_ITERATIONS,
 ) -> Runnable:
-    """Compile the Critic subgraph. Same laziness and injection as the Researcher."""
-    tools = list(tools) if tools is not None else [verify_citation]
-    tools_by_name = {t.name: t for t in tools}
-    _bound: dict[str, Runnable] = {}
+    """Compile the Critic subgraph.
 
-    def critic_model_runnable() -> Runnable:
-        if "model" not in _bound:
-            _bound["model"] = (model or get_chat_model()).bind_tools(tools)
-        return _bound["model"]
+    `tools` is the citation verifier (default [verify_citation]). Since Phase 7
+    it is called by code in `verify_citations`, not offered to the model.
+    Tests and the live-check harness inject stubs here, as before.
+    """
+    verifier = (list(tools) if tools is not None else [verify_citation])[0]
+    _cache: dict[str, BaseChatModel] = {}
+
+    def critic_model_runnable():
+        if "model" not in _cache:
+            # No bind_tools: the Critic has nothing to call (see above).
+            _cache["model"] = model or get_chat_model()
+        return _cache["model"]
 
     def spent(state: CriticState) -> int:
         """Round spend so far: the recorded round total plus this invocation."""
@@ -175,9 +221,26 @@ def build_critic(
 
     # ----------------------------------------------------------------- nodes
 
+    def verify_citations(state: CriticState) -> dict:
+        """Check every arXiv reference in the draft - code, not the model.
+
+        One lookup per distinct paper, in order of appearance, capped (see
+        tools/citations.py). No model call, so no model-call budget spent.
+        """
+        checks, lookups = [], []
+        for cited in extract_citations(state.get("draft") or ""):
+            try:
+                result = str(verifier.invoke({"arxiv_id": cited}))
+            except Exception as exc:  # noqa: BLE001 - a failed lookup is ERROR, not a crash
+                result = f"ERROR: lookup failed ({type(exc).__name__}: {exc}). This says nothing about the citation."
+            checks.append({"arxiv_id": cited, "status": parse_check(result)})
+            lookups.append(f"{cited}: {result}")
+        return {"citation_checks": checks, "lookups": lookups}
+
     def critic_model(state: CriticState) -> dict:
-        """One step: verify a citation, or give the verdict."""
+        """The one judging call: draft, notes, and lookup results as facts."""
         sub_questions = "\n".join(f"- {q}" for q in (state.get("sub_questions") or [])) or "(none)"
+        lookups = "\n".join(state.get("lookups") or []) or "(the draft cites no arXiv papers)"
         request = [
             SystemMessage(content=CRITIC_AGENT_PROMPT),
             HumanMessage(
@@ -187,10 +250,10 @@ def build_critic(
                     f"Research notes the draft was written from:\n"
                     f"{(state.get('research_notes') or '').strip() or '(none)'}\n\n"
                     f"Draft answer:\n"
-                    f"{(state.get('draft') or '').strip() or '(the Writer produced an empty draft)'}"
+                    f"{(state.get('draft') or '').strip() or '(the Writer produced an empty draft)'}\n\n"
+                    f"Citation checks (already run; treat as fact):\n{lookups}"
                 )
             ),
-            *state.get("critic_messages", []),
         ]
         result, attempts = invoke_with_recovery(
             critic_model_runnable(), request,
@@ -202,61 +265,33 @@ def build_critic(
             return {"critic_messages": [marker], "critic_iterations": iterations}
         return {"critic_messages": [result], "critic_iterations": iterations}
 
-    def critic_tools(state: CriticState) -> dict:
-        last = state["critic_messages"][-1]
-        if not isinstance(last, AIMessage) or not last.tool_calls:
-            return {}
-        return {
-            "critic_messages": [_execute_tool_call(call, tools_by_name) for call in last.tool_calls]
-        }
-
     def compile_verdict(state: CriticState) -> dict:
-        """Turn the private loop's end into the fields that leave the subgraph."""
+        """Turn the model's reply into the fields that leave the subgraph."""
         messages = state.get("critic_messages", [])
-
-        # The structured facts: every verification this pass made, in order.
-        requested = {
-            call["id"]: str(call["args"].get("arxiv_id", ""))
-            for m in messages
-            if isinstance(m, AIMessage)
-            for call in (m.tool_calls or [])
-            if call["name"] == "verify_citation"
-        }
-        checks = [
-            {"arxiv_id": requested[m.tool_call_id], "status": parse_check(m.text)}
-            for m in messages
-            if isinstance(m, ToolMessage) and m.tool_call_id in requested
-        ]
-
+        checks = state.get("citation_checks") or []
         used = spent(state)
         budget = {"critic": {"used": used, "cap": max_iterations}}
         last = messages[-1] if messages else None
 
-        if isinstance(last, AIMessage) and last.additional_kwargs.get("model_error"):
-            # Phase 7: the model failed even after a retry. Fail closed, as for
-            # an exhausted budget: "did not finish" is never "approved".
+        if last is None:
+            # Never called: the round budget was spent on entry.
             return {
-                "verdict": "reject",
+                "verdict": "incomplete",
+                "critique": OUT_OF_BUDGET_CRITIQUE.format(used=used, cap=max_iterations),
+                "citation_checks": checks,
+                "budgets": budget,
+            }
+        if last.additional_kwargs.get("model_error"):
+            return {
+                "verdict": "incomplete",
                 "critique": MODEL_ERROR_CRITIQUE.format(error=last.additional_kwargs["model_error"][:300]),
                 "citation_checks": checks,
                 "budgets": budget,
             }
 
-        if last is None or (isinstance(last, AIMessage) and last.tool_calls):
-            # Out of budget before a verdict - or never started, because the
-            # round budget was already spent on entry. Fail closed.
-            checked = ", ".join(f"{c['arxiv_id']} {c['status']}" for c in checks) or "none"
-            return {
-                "verdict": "reject",
-                "critique": OUT_OF_BUDGET_CRITIQUE.format(
-                    used=used, cap=max_iterations, checked=checked
-                ),
-                "citation_checks": checks,
-                "budgets": budget,
-            }
-
         # Phase 5's pipeline, unchanged: first-line convention -> verdict dict ->
-        # the shared fail-closed parser.
+        # the shared fail-closed parser. A garbled reply is a *finished* review
+        # that said nothing readable, so it is still a rejection.
         decision, _text, note = _parse_verdict(_parse_critique(last.text))
         if decision == "approve":
             return {
@@ -277,29 +312,17 @@ def build_critic(
     def start_or_skip(state: CriticState) -> str:
         """Defence in depth. The Supervisor's guards never dispatch a Critic
         whose round budget is spent, but if something does, it must not make a
-        model call past its cap. It goes straight to the fail-closed verdict."""
-        return "compile_verdict" if spent(state) >= max_iterations else "critic_model"
-
-    def should_verify(state: CriticState) -> str:
-        if spent(state) >= max_iterations:
-            return "compile_verdict"
-        last = state["critic_messages"][-1]
-        if isinstance(last, AIMessage) and last.tool_calls:
-            return "critic_tools"
-        return "compile_verdict"
+        model call past its cap. It goes straight to an `incomplete` verdict."""
+        return "compile_verdict" if spent(state) >= max_iterations else "verify_citations"
 
     builder = StateGraph(CriticState, input_schema=CriticInput, output_schema=CriticOutput)
+    builder.add_node("verify_citations", verify_citations)
     builder.add_node("critic_model", critic_model)
-    builder.add_node("critic_tools", critic_tools)
     builder.add_node("compile_verdict", compile_verdict)
     builder.add_conditional_edges(
-        START, start_or_skip, {"critic_model": "critic_model", "compile_verdict": "compile_verdict"}
+        START, start_or_skip, {"verify_citations": "verify_citations", "compile_verdict": "compile_verdict"}
     )
-    builder.add_conditional_edges(
-        "critic_model",
-        should_verify,
-        {"critic_tools": "critic_tools", "compile_verdict": "compile_verdict"},
-    )
-    builder.add_edge("critic_tools", "critic_model")
+    builder.add_edge("verify_citations", "critic_model")
+    builder.add_edge("critic_model", "compile_verdict")
     builder.add_edge("compile_verdict", END)
     return builder.compile(name="critic")

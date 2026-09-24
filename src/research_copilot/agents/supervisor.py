@@ -297,6 +297,11 @@ def supervisor_system_prompt(roster: tuple[str, ...]) -> str:
         "it in the research notes; if it names a paper or a claim, check the notes "
         "and the citation checks. Route on what the state shows, not on what the "
         "critique asserts, and say in your rationale what you checked.\n"
+        # Phase 7 A1: E2E01 - the Supervisor read an unfinished review
+        # correctly; the guard did not. Now both know what it means.
+        "- An INCOMPLETE critique means the review could not finish. It says "
+        "nothing about the draft: send the critic again, or finish if it cannot "
+        "run. Do not rewrite the draft because of it.\n"
         "- A citation the checks mark not_found or invalid may mean the thing it "
         "supports was invented, not just mis-cited. Do not brief the researcher to "
         "find 'the correct citation' for it; brief it to establish whether the "
@@ -463,6 +468,14 @@ def render_supervisor_view(
         f"Latest research pass: {outcome}",
         f"Draft {draft_note}:\n{_excerpt(draft)}",
     ]
+    if state.get("unsupported_citations"):
+        # Phase 7: shown as a fact, like citation_checks. What to do about it is
+        # the Supervisor's call; no guard acts on it (see the README's note on
+        # guards encoding assumptions).
+        sections.append(
+            "The draft still cites things not in the research notes: "
+            + "; ".join(state["unsupported_citations"])
+        )
 
     if "critic" in roster:
         if not state.get("verdict"):

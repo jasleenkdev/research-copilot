@@ -494,3 +494,74 @@ def test_cli_critic_flag_puts_the_critic_on_the_roster(monkeypatch, capsys):
     assert "OVERRIDDEN: finish proposed before the critic approved this draft" in err
     assert "[critic] APPROVE" in err
     assert "roster: researcher, writer, critic" in err
+
+
+# --- Phase 7: "incomplete" is not "rejected" (E2E01, Groq) -------------------------------
+
+GROQ_TOOL_ERROR = RuntimeError("Error code: 400 - tool_use_failed: not in request.tools")
+
+
+class FailingThenScripted(RecordingModel):
+    """Raises for the first `failures` calls, then follows its script."""
+
+    failures: int = 0
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if self.failures > 0:
+            self.failures -= 1
+            self.requests.append(list(messages))
+            raise GROQ_TOOL_ERROR
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def test_an_incomplete_review_spends_no_revision_and_forces_no_rewrite():
+    """E2E01's shape: the first review cannot finish (model fails twice). The
+    Supervisor sends the Critic again - and the old guard would have forced a
+    rewrite here. Now: no revision spent, the Writer is not re-dispatched, and
+    the second review approves the same draft."""
+    critic = FailingThenScripted(responses=[AIMessage(content="APPROVE")], failures=2)
+    supervisor = ScriptedSupervisor(
+        [decide("researcher"), decide("writer"), decide("critic"),
+         decide("critic", "the review could not finish; run it again")]
+    )
+    state = run_multi_agent("Q", graph=build(supervisor=supervisor, critic=critic))
+
+    assert routes(state) == ["researcher", "writer", "critic", "critic"]
+    assert all(e["override"] == "" for e in state["supervisor_log"])
+    assert state["revisions"] == 0
+    assert state["dispatches"]["writer"] == 1
+    assert final_answer(state) == "draft 1"
+    assert "INCOMPLETE" in supervisor.views[3]
+
+
+def test_a_critic_that_never_finishes_ends_in_a_delivered_unreviewed_answer():
+    """When the Critic cannot finish and its dispatches run out, the draft is
+    delivered - not withheld, which delivered nothing in E2E01 - and marked as
+    unreviewed. Never presented as approved."""
+    critic = FailingThenScripted(responses=[AIMessage(content="unused")], failures=100)
+    state = run_multi_agent(
+        "Q",
+        graph=build(
+            supervisor=ScriptedSupervisor(itertools.repeat(decide("critic"))),
+            critic=critic, routing="fixed", max_revisions=1,
+        ),
+    )
+    assert state["verdict"] == "incomplete"
+    assert state["revisions"] == 0
+    answer = final_answer(state)
+    assert answer.startswith("(Note: this answer was not checked by the reviewer")
+    assert "draft 1" in answer
+
+
+def test_a_garbled_verdict_is_still_a_rejection():
+    """Only a review that could not *finish* is incomplete. One that finished
+    and said something unreadable still fails closed (Phase 5)."""
+    state = run_multi_agent(
+        "Q",
+        graph=build(
+            supervisor=ScriptedSupervisor([decide("researcher"), decide("writer"), decide("critic")]),
+            critic=scripted("Looks fine I guess"), max_revisions=0,
+        ),
+    )
+    assert state["verdict"] == "reject"
+    assert "withheld" in final_answer(state)

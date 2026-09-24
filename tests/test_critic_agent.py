@@ -110,7 +110,7 @@ def critic_run(*, critic, supervisor_script, writer=None, researcher=None, verif
 
 def test_critic_verification_traffic_never_reaches_the_shared_transcript():
     graph, _ = critic_run(
-        critic=scripted(verify("2309.15217", "v1"), "APPROVE"),
+        critic=scripted("APPROVE"),
         supervisor_script=[decide("researcher"), decide("writer"), decide("critic")],
     )
     state = run_multi_agent("Q", graph=graph)
@@ -122,9 +122,9 @@ def test_critic_verification_traffic_never_reaches_the_shared_transcript():
 
 
 def test_critic_verification_is_not_shown_to_the_writer_on_revision():
-    writer = scripted("draft one", "draft two")
+    writer = scripted("draft one citing 2309.15217", "draft two")
     graph, _ = critic_run(
-        critic=scripted(verify("9999.99999", "v1"), "REJECT\nCitation 9999.99999 does not exist.", "APPROVE"),
+        critic=scripted("REJECT\nCitation 9999.99999 does not exist.", "APPROVE"),
         writer=writer,
         supervisor_script=[
             decide("researcher"), decide("writer"), decide("critic"),
@@ -145,7 +145,7 @@ def test_critic_private_channel_is_hidden_from_state_not_from_disk():
     get_state(), but checkpointed under the critic's own namespace."""
     saver = MemorySaver()
     graph, _ = critic_run(
-        critic=scripted(verify("2309.15217", "v1"), "APPROVE"),
+        critic=scripted("APPROVE"),
         supervisor_script=[decide("researcher"), decide("writer"), decide("critic")],
         checkpointer=saver,
     )
@@ -159,7 +159,8 @@ def test_critic_private_channel_is_hidden_from_state_not_from_disk():
         if c.config["configurable"].get("checkpoint_ns", "").startswith("critic:")
     ]
     assert critic_namespaces
-    assert any("FOUND: 2309.15217" in repr(v.get("critic_messages", [])) for v in critic_namespaces)
+    # Phase 7: the raw lookups live in the private `lookups` key now.
+    assert any("FOUND: 2309.15217" in repr(v.get("lookups", [])) for v in critic_namespaces)
 
 
 def test_critic_output_schema_and_owners_table_agree():
@@ -192,18 +193,13 @@ def test_unparseable_critique_fails_closed_to_a_rejection(garbled):
     assert "withheld" in final_answer(state)
 
 
-def test_citation_checks_are_recorded_as_structured_results():
+def test_citation_checks_are_run_by_code_for_every_cited_id():
+    """Phase 7: the Critic's model no longer decides what to look up. Every
+    arXiv reference in the draft is checked before the judging call."""
+    critic = scripted("REJECT\n1111.11111 does not exist")
     graph, _ = critic_run(
-        critic=scripted(
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "verify_citation", "args": {"arxiv_id": "2309.15217"}, "id": "a", "type": "tool_call"},
-                    {"name": "verify_citation", "args": {"arxiv_id": "1111.11111"}, "id": "b", "type": "tool_call"},
-                ],
-            ),
-            "REJECT\n1111.11111 does not exist",
-        ),
+        critic=critic,
+        writer=scripted("RAGAS [http://arxiv.org/abs/2309.15217v2] and X [1111.11111], RAGAS again [2309.15217]"),
         supervisor_script=[decide("researcher"), decide("writer"), decide("critic")],
         max_revisions=0,
     )
@@ -212,6 +208,11 @@ def test_citation_checks_are_recorded_as_structured_results():
         {"arxiv_id": "2309.15217", "status": "found"},
         {"arxiv_id": "1111.11111", "status": "not_found"},
     ]
+    judging_request = "\n".join(m.text for m in critic.requests[0])
+    assert "Citation checks (already run; treat as fact)" in judging_request
+    assert "1111.11111: NOT FOUND" in judging_request
+    # One judging call, no tool loop.
+    assert len(critic.requests) == 1
 
 
 def test_critic_is_shown_the_research_notes_it_checks_the_draft_against():
@@ -225,14 +226,22 @@ def test_critic_is_shown_the_research_notes_it_checks_the_draft_against():
     assert "unique-evidence-marker" in "\n".join(m.text for m in critic.requests[0])
 
 
-def test_critic_budget_running_out_mid_verification_fails_closed():
+def test_a_review_costs_one_model_call_however_many_citations():
     graph, _ = critic_run(
-        critic=scripted(verify("a", "1"), verify("b", "2"), verify("c", "3")),
+        critic=scripted("APPROVE"),
+        writer=scripted("A [2309.15217], B [2005.11401], C [1706.03762], D [2311.09476]"),
         supervisor_script=[decide("researcher"), decide("writer"), decide("critic")],
-        max_critic_iterations=2,
-        max_revisions=0,
     )
     state = run_multi_agent("Q", graph=graph)
-    assert state["verdict"] == "reject"
-    assert "budget" in state["critique"]
-    assert state["budgets"]["critic"]["used"] == 2
+    assert len(state["citation_checks"]) == 4
+    assert state["budgets"]["critic"]["used"] == 1
+    assert state["verdict"] == "approve"
+
+
+def test_a_critic_that_cannot_run_is_incomplete_not_rejected():
+    from research_copilot.agents.critic import build_critic
+
+    critic = build_critic(model=scripted("unused"), tools=[stub_verifier({})], max_iterations=1)
+    out = critic.invoke({"question": "Q", "draft": "d", "budgets": {"critic": {"used": 1, "cap": 1}}})
+    assert out["verdict"] == "incomplete"
+    assert "says nothing about the draft" in out["critique"]

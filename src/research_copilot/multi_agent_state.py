@@ -129,7 +129,12 @@ AGENTS: tuple[str, ...] = ("researcher", "writer", "critic")
 # 6.3. The Critic's verdict on the draft it was shown. It has two values plus
 # "not yet", and deliberately no "edit". Phase 5's reasoning holds: rewriting is
 # the Writer's job, and a Critic that rewrites is a second Writer nobody reviews.
-Verdict = Literal["approve", "reject"]
+#
+# Phase 7: "incomplete" - the review could not finish (model error, budget
+# spent on entry). Not an approval, and not a rejection: a real run showed
+# that treating it as a rejection spends a revision and forces a rewrite of a
+# draft nobody faulted (E2E01, Groq). See agents/critic.py.
+Verdict = Literal["approve", "reject", "incomplete"]
 
 # 6.3. The human reviewer's verdict: Phase 4's three decisions. "edit" is the
 # one power a person has that the Critic does not.
@@ -342,6 +347,10 @@ class MultiAgentState(TypedDict, total=False):
     # hold. What changed is that the key now has exactly one author, *by rule*
     # rather than by accident.
     draft: str
+    # Phase 7: citations in `draft` that cannot be traced to the research notes,
+    # after the Writer's one corrective retry. Empty is the normal case. See
+    # `unsupported_citations` in agents/writer.py.
+    unsupported_citations: list[str]
 
     # --- the Supervisor's decisions (owner: supervisor) -------------------------
     # CONCEPT (6.2): the Supervisor owns the *routing* fields, and no content.
@@ -550,7 +559,7 @@ OWNERS: dict[str, frozenset[str]] = {
     # Must match ResearcherOutput exactly. tests/test_multi_agent.py checks it.
     "researcher": frozenset(ResearcherOutput.__annotations__),
     # 6.3: and its own `budgets` entry - see BUDGET_ENTRY_OWNERS.
-    "writer": frozenset({"draft", "budgets"}),
+    "writer": frozenset({"draft", "budgets", "unsupported_citations"}),
     # Must match CriticOutput exactly, same check as the Researcher.
     "critic": frozenset(CriticOutput.__annotations__),
     "review_draft": frozenset({"human_verdict", "human_feedback", "human_edit"}),

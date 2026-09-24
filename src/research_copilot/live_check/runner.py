@@ -312,6 +312,13 @@ def writer_checks(s: Scenario, draft: str) -> dict:
     if "max_ref" in s.expect:
         refs = {int(n) for n in _BRACKET_REF.findall(draft)}
         checks["refs_in_range"] = bool(refs) and max(refs) <= s.expect["max_ref"]
+    # Phase 7: the runtime check, applied to the final draft (after the Writer's
+    # own corrective retry).
+    from research_copilot.agents.writer import unsupported_citations
+
+    checks["no_unsupported_citations"] = not unsupported_citations(
+        draft, s.inputs.get("research_notes", ""), mode=s.inputs.get("mode", "live-search")
+    )
     return checks
 
 

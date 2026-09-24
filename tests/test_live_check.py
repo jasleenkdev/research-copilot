@@ -231,23 +231,18 @@ def test_writer_checks_catch_a_citation_not_in_the_notes(tmp_path):
 def test_writer_gap_check_on_empty_notes(tmp_path):
     cfg, _, _ = cfg_with(tmp_path, replies=["I could not find supporting evidence for this."])
     r = runner.run(cfg, [by_id()["WRT02"]], log=quiet)["WRT02"]
-    assert r["checks"] == {"non_empty": True, "cites_only_notes": True, "admits_gap": True}
+    assert r["checks"] == {"non_empty": True, "cites_only_notes": True, "admits_gap": True,
+                           "no_unsupported_citations": True}
 
 
 def test_critic_scenario_reads_verdict_and_lookups(tmp_path):
-    cfg, _, _ = cfg_with(tmp_path, replies=[
-        AIMessage(content="", tool_calls=[{"name": "verify_citation", "args": {"arxiv_id": "2401.99999"}, "id": "1", "type": "tool_call"}]),
-        "REJECT\n2401.99999 does not exist",
-    ])
+    cfg, _, _ = cfg_with(tmp_path, replies=["REJECT\n2401.99999 does not exist"])
     r = runner.run(cfg, [by_id()["CRT02"]], log=quiet)["CRT02"]
     assert r["checks"] == {"verdict": True, "used_verify_citation": True, "2401.99999_rejected_by_lookup": True}
 
 
 def test_critic_lookup_failure_scenario_uses_an_error_stub(tmp_path):
-    cfg, _, _ = cfg_with(tmp_path, replies=[
-        AIMessage(content="", tool_calls=[{"name": "verify_citation", "args": {"arxiv_id": "2309.15217"}, "id": "1", "type": "tool_call"}]),
-        "APPROVE",
-    ])
+    cfg, _, _ = cfg_with(tmp_path, replies=["APPROVE"])
     r = runner.run(cfg, [by_id()["CRT05"]], log=quiet)["CRT05"]
     assert r["observed"]["citation_checks"] == [{"arxiv_id": "2309.15217", "status": "error"}]
     assert r["status"] == "pass"
@@ -437,3 +432,40 @@ def test_report_compares_item_2_against_a_baseline(tmp_path):
     text = report.render(current, baseline=baseline)
     assert "baseline (before this run's changes): strict 0/1" in text
     assert "CHANGED SUP06: researcher -> writer" in text
+
+
+# --- Phase 7: the Writer's unsupported-citation check -------------------------------------
+
+
+def test_unsupported_citations_catches_markup_foreign_ids_and_out_of_range_refs():
+    from research_copilot.agents.writer import unsupported_citations
+
+    notes = sc.NOTES
+    assert unsupported_citations("RAGAS [2309.15217].", notes) == []
+    assert unsupported_citations("ARES [2311.09476].", notes) == ["arXiv 2311.09476"]
+    assert unsupported_citations("Grounded in sources【1†L1-L7】.", notes) == ["【1†L1-L7】"]
+    # Markup that does carry a notes id is traceable - not flagged.
+    assert unsupported_citations("See【1†http://arxiv.org/abs/2309.15217v2】.", notes) == []
+    assert unsupported_citations("As [1] and [3] say.", sc.KB_NOTES, mode="knowledge-base") == [
+        "[3] (no excerpt [3] in the notes)"
+    ]
+
+
+def test_writer_retries_once_naming_the_unsupported_citations(tmp_path):
+    from research_copilot.agents.writer import make_writer
+
+    model = FakeEverything(responses=[AIMessage(content="RAG grounds claims【1†L1-L7】."),
+                                      AIMessage(content="RAG grounds claims [http://arxiv.org/abs/2309.15217].")])
+    write = make_writer(model=model)
+    out = write({"question": "Q", "research_notes": sc.NOTES, "messages": []})
+    assert out["draft"] == "RAG grounds claims [http://arxiv.org/abs/2309.15217]."
+    assert out["unsupported_citations"] == []
+    assert out["budgets"]["writer"]["used"] == 2
+
+
+def test_writer_records_what_is_still_unsupported_after_the_retry():
+    from research_copilot.agents.writer import make_writer
+
+    model = FakeEverything(responses=[AIMessage(content="X【1†L1】."), AIMessage(content="Still【2†L2】.")])
+    out = make_writer(model=model)({"question": "Q", "research_notes": sc.NOTES, "messages": []})
+    assert out["unsupported_citations"] == ["【2†L2】"]
