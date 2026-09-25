@@ -1248,7 +1248,11 @@ def _print_multi_agent_state(state: dict) -> None:
             f"tokens (limit {t['limit']})",
             file=sys.stderr,
         )
-    budgets = state.get("budgets") or {}
+    # Part B: one field per agent; the legacy dict only on old threads.
+    budgets = {
+        agent: state[f"{agent}_budget"] for agent in ("researcher", "writer", "critic")
+        if state.get(f"{agent}_budget")
+    } or (state.get("budgets") or {})
     if budgets:
         print(
             "  (per agent)    -> round budgets: "

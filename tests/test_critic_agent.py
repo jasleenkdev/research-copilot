@@ -234,7 +234,7 @@ def test_a_review_costs_one_model_call_however_many_citations():
     )
     state = run_multi_agent("Q", graph=graph)
     assert len(state["citation_checks"]) == 4
-    assert state["budgets"]["critic"]["used"] == 1
+    assert state["critic_budget"]["used"] == 1
     assert state["verdict"] == "approve"
 
 
@@ -242,6 +242,50 @@ def test_a_critic_that_cannot_run_is_incomplete_not_rejected():
     from research_copilot.agents.critic import build_critic
 
     critic = build_critic(model=scripted("unused"), tools=[stub_verifier({})], max_iterations=1)
-    out = critic.invoke({"question": "Q", "draft": "d", "budgets": {"critic": {"used": 1, "cap": 1}}})
+    out = critic.invoke({"question": "Q", "draft": "d", "critic_budget": {"used": 1, "cap": 1}})
     assert out["verdict"] == "incomplete"
     assert "says nothing about the draft" in out["critique"]
+
+
+
+# --- Part B: the Writer's flag reaches the Critic --------------------------------------
+
+
+def test_the_critic_is_shown_the_writers_unsupported_citations():
+    from research_copilot.agents.critic import build_critic
+
+    critic = scripted("REJECT\nARES is not in the notes")
+    build_critic(model=critic, tools=[stub_verifier({"2311.09476": "ARES"})]).invoke(
+        {"question": "Q", "draft": "ARES [2311.09476]", "research_notes": "notes",
+         "unsupported_citations": ["arXiv 2311.09476"]}
+    )
+    sent = "\n".join(m.text for m in critic.requests[0])
+    assert "NOT in the research notes (found by code; treat as fact)" in sent
+    assert "- arXiv 2311.09476" in sent
+
+
+def test_with_no_flags_the_critic_is_told_so_explicitly():
+    from research_copilot.agents.critic import build_critic
+
+    critic = scripted("APPROVE")
+    build_critic(model=critic, tools=[stub_verifier({})]).invoke({"question": "Q", "draft": "d", "research_notes": "n"})
+    assert "(none - every citation in the draft appears in the notes)" in "\n".join(m.text for m in critic.requests[0])
+
+
+def test_in_the_graph_the_writers_flag_reaches_the_critic():
+    """The coordination gap, closed end to end: the Writer's own check flags
+    a citation the notes lack; the Critic's judging request contains it."""
+    critic = scripted("REJECT\nunsupported", "APPROVE")
+    graph, _ = critic_run(
+        critic=critic,
+        researcher=scripted("Findings: X (2309.15217)"),
+        # Both drafts cite a paper the notes lack, so the Writer's retry does
+        # not clear the flag.
+        writer=scripted("RAGAS [2309.15217] and ARES [2311.09476]", "still ARES [2311.09476]"),
+        supervisor_script=[decide("researcher"), decide("writer"), decide("critic")],
+        max_revisions=0,
+    )
+    state = run_multi_agent("Q", graph=graph)
+    assert state["unsupported_citations"] == ["arXiv 2311.09476"]
+    assert "- arXiv 2311.09476" in "\n".join(m.text for m in critic.requests[0])
+    assert state["verdict"] == "reject"

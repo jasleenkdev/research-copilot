@@ -146,7 +146,12 @@ CRITIC_AGENT_PROMPT = (
     "paper is. NOT FOUND or INVALID means the citation is wrong. ERROR means the "
     "lookup failed - it is not evidence either way; do not reject a draft "
     "because of it.\n"
-    "- Is speculation labelled as speculation?\n\n"
+    "- Is speculation labelled as speculation?\n"
+    # Phase 7 Part B: the Writer's flag, now shown to the Critic (see below).
+    "- Does it cite only sources the notes contain? Any citation listed as NOT "
+    "in the research notes is unsupported, even if the paper is real: reject the "
+    "draft and name it. That is a writing problem - the Writer added a source "
+    "nobody researched.\n\n"
     "Reply in exactly this format:\n"
     "First line: APPROVE or REJECT, alone on the line.\n"
     "Then, if you rejected it, say what is wrong in concrete terms someone can "
@@ -191,7 +196,7 @@ class CriticState(CriticInput, CriticOutput, total=False):
     # the critic's namespace.
     lookups: list[str]
     # Model calls in *this* invocation. The round total lives in
-    # `budgets["critic"]`.
+    # `critic_budget` (Phase 7 Part B).
     critic_iterations: int
 
 
@@ -242,6 +247,14 @@ def build_critic(
         """The one judging call: draft, notes, and lookup results as facts."""
         sub_questions = "\n".join(f"- {q}" for q in (state.get("sub_questions") or [])) or "(none)"
         lookups = "\n".join(state.get("lookups") or []) or "(the draft cites no arXiv papers)"
+        # Phase 7 Part B: the Writer's own finding, wired to the agent that can
+        # act on it (the coordination gap - see the README). A fact from code,
+        # like the lookups: the model is not asked to rediscover it.
+        flagged = state.get("unsupported_citations") or []
+        unsupported = (
+            "\n".join(f"- {item}" for item in flagged)
+            if flagged else "(none - every citation in the draft appears in the notes)"
+        )
         notes = (state.get("research_notes") or "").strip() or "(none)"
         draft = (state.get("draft") or "").strip() or "(the Writer produced an empty draft)"
         limit = max_request_tokens()
@@ -258,7 +271,9 @@ def build_critic(
                         f"Sub-questions the plan called for (may be empty):\n{sub_questions}\n\n"
                         f"Research notes the draft was written from:\n{notes_text}\n\n"
                         f"Draft answer:\n{draft}\n\n"
-                        f"Citation checks (already run; treat as fact):\n{lookups}"
+                        f"Citation checks (already run; treat as fact):\n{lookups}\n\n"
+                        f"Citations in the draft that are NOT in the research notes "
+                        f"(found by code; treat as fact):\n{unsupported}"
                     )
                 )
             base = estimate([SystemMessage(content=CRITIC_AGENT_PROMPT), human("")])
@@ -286,7 +301,7 @@ def build_critic(
         messages = state.get("critic_messages", [])
         checks = state.get("citation_checks") or []
         used = spent(state)
-        budget = {"critic": {"used": used, "cap": max_iterations}}
+        budget = {"used": used, "cap": max_iterations}
         last = messages[-1] if messages else None
 
         if last is None:
@@ -295,14 +310,14 @@ def build_critic(
                 "verdict": "incomplete",
                 "critique": OUT_OF_BUDGET_CRITIQUE.format(used=used, cap=max_iterations),
                 "citation_checks": checks,
-                "budgets": budget,
+                "critic_budget": budget,
             }
         if last.additional_kwargs.get("model_error"):
             return {
                 "verdict": "incomplete",
                 "critique": MODEL_ERROR_CRITIQUE.format(error=last.additional_kwargs["model_error"][:300]),
                 "citation_checks": checks,
-                "budgets": budget,
+                "critic_budget": budget,
             }
 
         # Phase 5's pipeline, unchanged: first-line convention -> verdict dict ->
@@ -314,13 +329,13 @@ def build_critic(
                 "verdict": "approve",
                 "critique": note or "(approved by the critic)",
                 "citation_checks": checks,
-                "budgets": budget,
+                "critic_budget": budget,
             }
         return {
             "verdict": "reject",
             "critique": note or "(rejected by the critic without a reason given)",
             "citation_checks": checks,
-            "budgets": budget,
+            "critic_budget": budget,
         }
 
     # --------------------------------------------------------------- routing

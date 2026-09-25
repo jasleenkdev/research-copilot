@@ -147,7 +147,7 @@ def _after_rejection(critique: str, *, draft: str, checks: list[dict] | None = N
         "revisions": 1,
         "dispatches": {"researcher": 1, "writer": 1, "critic": 1},
         "supervisor_log": _log("researcher", "writer", "critic"),
-        "budgets": {"researcher": {"used": 3}, "writer": {"used": 0}, "critic": {"used": 0}},
+        "researcher_budget": {"used": 3}, "writer_budget": {"used": 0}, "critic_budget": {"used": 0},
     }
 
 
@@ -363,6 +363,21 @@ SCENARIOS: list[Scenario] = [
     Scenario("CRT06", "6", "critic", "Malformed arXiv id",
              {"draft": GOOD_DRAFT.replace("http://arxiv.org/abs/2309.15217", "arXiv:12345")},
              {"verdict": "reject"}, est_tokens=5000),
+
+    # --- 6 (Part B): the coordination gap from E2E01 ---------------------------
+    # A real paper the notes do not contain. CRT07 gives the Critic the Writer's
+    # flag, as the graph now does; CRT08 is the control without it - the
+    # situation E2E01's confirming run was in when the Critic approved.
+    Scenario("CRT07", "6", "critic", "Real paper not in the notes, WITH the Writer's flag",
+             {"draft": GOOD_DRAFT + " ARES [2311.09476] is another option.",
+              "unsupported_citations": ["arXiv 2311.09476"]},
+             {"verdict": "reject", "found": ["2311.09476"]}, est_tokens=1500,
+             note="Part B: the flag now reaches the Critic."),
+    Scenario("CRT08", "6", "critic", "CONTROL: the same draft WITHOUT the flag",
+             {"draft": GOOD_DRAFT + " ARES [2311.09476] is another option."},
+             {"verdict": "reject", "found": ["2311.09476"]}, est_tokens=1500,
+             note="Measures whether the Critic catches it unaided. A pass here would mean "
+                  "the flag is redundant; a fail confirms the coordination gap."),
 
     # --- 7: end to end (cost, latency, an overall read) -------------------------
     Scenario("E2E01", "7", "e2e", "Full run with the Critic",

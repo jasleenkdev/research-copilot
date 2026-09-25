@@ -311,13 +311,24 @@ def test_merge_budgets_merges_per_agent_and_per_field():
     assert existing["writer"]["used"] == 1  # not mutated
 
 
-def test_a_plain_node_may_write_only_its_own_budget_entry():
+def test_a_plain_node_may_write_only_its_own_budget_field():
+    """Part B: ordinary per-field ownership now covers budgets."""
+
     @owns("writer")
     def writer_touching_critic_budget(state):
-        return {"draft": "x", "budgets": {"writer": {"used": 1}, "critic": {"used": 0}}}
+        return {"draft": "x", "writer_budget": {"used": 1}, "critic_budget": {"used": 0}}
 
-    with pytest.raises(OwnershipError, match="budget entries"):
+    with pytest.raises(OwnershipError, match="critic_budget"):
         writer_touching_critic_budget({})
+
+
+def test_nothing_may_write_the_legacy_budgets_dict():
+    @owns("writer")
+    def writer_using_the_old_dict(state):
+        return {"draft": "x", "budgets": {"writer": {"used": 1}}}
+
+    with pytest.raises(OwnershipError, match="budgets"):
+        writer_using_the_old_dict({})
 
 
 def test_all_three_agents_have_budget_entries_after_a_full_run():
@@ -329,9 +340,9 @@ def test_all_three_agents_have_budget_entries_after_a_full_run():
             critic=scripted("APPROVE"),
         ),
     )
-    assert state["budgets"]["researcher"] == {"used": 2, "cap": 6}
-    assert state["budgets"]["writer"] == {"used": 1, "cap": 2}
-    assert state["budgets"]["critic"] == {"used": 1, "cap": 4}
+    assert state["researcher_budget"] == {"used": 2, "cap": 6}
+    assert state["writer_budget"] == {"used": 1, "cap": 2}
+    assert state["critic_budget"] == {"used": 1, "cap": 4}
 
 
 def test_research_budget_is_shared_across_passes_within_a_round():
@@ -348,7 +359,7 @@ def test_research_budget_is_shared_across_passes_within_a_round():
             max_research_iterations=4,
         ),
     )
-    assert state["budgets"]["researcher"]["used"] == 4
+    assert state["researcher_budget"]["used"] == 4
     assert state["research_outcome"] == "budget_exhausted"
     assert len(researcher.requests) == 4
 
@@ -365,9 +376,9 @@ def test_start_revision_resets_every_agents_round_budget_but_not_dispatches():
         ),
     )
     # Round 2 (after the rejection): only the Writer and Critic ran.
-    assert state["budgets"]["researcher"]["used"] == 0
-    assert state["budgets"]["writer"]["used"] == 1
-    assert state["budgets"]["critic"]["used"] == 1
+    assert state["researcher_budget"]["used"] == 0
+    assert state["writer_budget"]["used"] == 1
+    assert state["critic_budget"]["used"] == 1
     # Per turn, never reset by the revision.
     assert state["dispatches"] == {"researcher": 1, "writer": 2, "critic": 2}
 
@@ -453,28 +464,19 @@ def test_a_pre_6_3_thread_with_no_budgets_resumes_cleanly():
 
     state = g.invoke(multi_agent_turn_input("new q"), config)
     assert final_answer(state) == "draft 1"
-    assert set(state["budgets"]) == set(AGENTS)
+    assert all(state.get(f"{agent}_budget") is not None for agent in AGENTS)
     assert state["dispatches"] == {"researcher": 1, "writer": 1, "critic": 1}
 
 
-def test_subgraph_budget_passthrough_leaves_other_entries_alone():
-    """The documented limit of sub-key ownership for subgraphs (see `owns`):
-    the Researcher returns the whole `budgets` dict, and the merge makes the
-    passthrough a no-op. Sequential execution is what makes that safe."""
-    state = run_multi_agent(
-        "Q",
-        graph=build(
-            supervisor=ScriptedSupervisor(
-                [decide("researcher"), decide("writer"), decide("critic"), decide("researcher", brief="x"), decide("writer"), decide("critic")]
-            ),
-            researcher=scripted("n1", "n2"),
-            critic=scripted("REJECT\nmore evidence", "APPROVE"),
-        ),
-    )
-    # After the revision, the Writer's round entry was reset to 0 and then set
-    # to 1 by its rewrite; the Researcher's second pass did not stomp on it.
-    assert state["budgets"]["writer"]["used"] == 1
-    assert state["budgets"]["critic"]["used"] == 1
+def test_the_researcher_returns_only_its_own_budget():
+    """Part B: what replaced 6.3's passthrough test. The subgraph's output
+    carries no other agent's budget - not even an unchanged copy - so there is
+    nothing a parallel branch could overwrite."""
+    from research_copilot.multi_agent_state import ResearcherOutput, CriticOutput
+
+    assert {k for k in ResearcherOutput.__annotations__ if "budget" in k} == {"researcher_budget"}
+    assert {k for k in CriticOutput.__annotations__ if "budget" in k} == {"critic_budget"}
+    assert "budgets" not in ResearcherOutput.__annotations__
 
 
 # --- CLI ------------------------------------------------------------------------------
@@ -565,3 +567,32 @@ def test_a_garbled_verdict_is_still_a_rejection():
     )
     assert state["verdict"] == "reject"
     assert "withheld" in final_answer(state)
+
+
+def test_budget_of_reads_the_legacy_dict_on_an_old_thread():
+    """Threads checkpointed between 6.3 and Part B have `budgets`, not the
+    per-agent fields. budget_of falls back to it - the migration path."""
+    legacy = {"budgets": {"critic": {"used": 3, "cap": 4}}}
+    assert budget_of(legacy, "critic", 4) == {"used": 3, "cap": 4}
+    # The new field wins once it exists (a new turn writes it at begin_turn).
+    assert budget_of({**legacy, "critic_budget": {"used": 0}}, "critic", 4) == {"used": 0, "cap": 4}
+
+
+def test_a_thread_from_before_part_b_resumes_on_the_new_fields():
+    saver = MemorySaver()
+    config = {"configurable": {"thread_id": "pre-b"}}
+    g = build(
+        supervisor=ScriptedSupervisor([decide("researcher"), decide("writer"), decide("critic")]),
+        critic=scripted("APPROVE"), checkpointer=saver,
+    )
+    g.update_state(
+        config,
+        {"messages": [HumanMessage(content="old q"), AIMessage(content="old a")],
+         "budgets": {"researcher": {"used": 5, "cap": 6}, "critic": {"used": 4, "cap": 4}},
+         "supervisor_log": []},
+        as_node="finalize_answer",
+    )
+    state = g.invoke(multi_agent_turn_input("new q"), config)
+    assert final_answer(state) == "draft 1"
+    assert state["critic_budget"]["used"] == 1       # fresh turn, fresh field
+    assert state["budgets"]["critic"]["used"] == 4   # legacy left as it was, unread

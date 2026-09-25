@@ -134,6 +134,7 @@ from research_copilot.models import get_chat_model
 from research_copilot.config import get_settings
 from research_copilot.multi_agent_state import (
     AGENTS,
+    BUDGET_FIELDS,
     MultiAgentState,
     _register_turn_boundary,
     owns,
@@ -335,7 +336,7 @@ def build_multi_agent_graph(
         CONCEPT: the third reset site
         Phase 4 reset `iterations` per turn (turn_input). Phase 5 reset it per
         revision round (start_revision). 6.3 resets every agent's
-        `budgets[agent]["used"]` per revision round, here and only here, so
+        `<agent>_budget["used"]` per revision round, here and only here, so
         there is one place responsible for "a new round is starting".
 
             turn boundary    resets everything per-turn: dispatches, revisions,
@@ -354,7 +355,7 @@ def build_multi_agent_graph(
         """
         return {
             "revisions": state.get("revisions", 0) + 1,
-            "budgets": {agent: {"used": 0} for agent in AGENTS},
+            **{field: {"used": 0} for field in BUDGET_FIELDS.values()},
         }
 
     def finalize_answer(state: MultiAgentState) -> dict:
@@ -629,7 +630,9 @@ def per_turn_reset() -> dict:
         "human_feedback": "",
         "human_edit": "",
         "revisions": 0,
-        "budgets": {agent: {"used": 0} for agent in AGENTS},
+        # Part B: one field per agent (was one shared dict under a merge
+        # reducer, which also forced this reset to name every agent).
+        **{field: {"used": 0} for field in BUDGET_FIELDS.values()},
     }
 
 
@@ -700,7 +703,7 @@ def make_graph(config: dict | None = None) -> Runnable:
 #   counter                    scope                reset by           caps it
 #   -------------------------  -------------------  -----------------  --------------------
 #   research_iterations        one Researcher pass  (private start)    - (a report)
-#   budgets[agent]["used"]     one revision round   start_revision     max_*_iterations /
+#   <agent>_budget["used"]     one revision round   start_revision     max_*_iterations /
 #                                                                      max_writer_calls
 #   dispatches[agent]          one turn             turn boundary      dispatch caps
 #   revisions                  one turn             turn boundary      max_revisions

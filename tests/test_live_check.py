@@ -460,7 +460,7 @@ def test_writer_retries_once_naming_the_unsupported_citations(tmp_path):
     out = write({"question": "Q", "research_notes": sc.NOTES, "messages": []})
     assert out["draft"] == "RAG grounds claims [http://arxiv.org/abs/2309.15217]."
     assert out["unsupported_citations"] == []
-    assert out["budgets"]["writer"]["used"] == 2
+    assert out["writer_budget"]["used"] == 2
 
 
 def test_writer_records_what_is_still_unsupported_after_the_retry():

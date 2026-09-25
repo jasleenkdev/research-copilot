@@ -1365,11 +1365,28 @@ prompts:
 | a provider counts `max_tokens` against its limits | my headroom probe | Groq: the probe passed with ~1k free |
 | a request cannot outgrow the provider's ceiling | every agent, since Phase 6 | a 413 at 8,849 tokens |
 
-And one where the fix was a *detector* but nothing acted on what it found:
-E2E01's confirming run delivered a citation the notes did not contain,
-after the Writer's check had flagged it and the Supervisor had read the flag.
-A check that nobody downstream acts on turns silent bad output into logged
-bad output. That is better, but it is not a fix.
+### A different failure: the coordination gap
+
+The table above is about single components holding a wrong belief. E2E01's
+confirming run found a failure where **no component was wrong**:
+
+- the Writer's check flagged a citation the notes did not contain (correct)
+- the Supervisor read the flag and wanted more research (correct)
+- a budget guard refused, because the Researcher's round budget was spent
+  (correct, by its own rule)
+- the Critic approved, judging what it was shown - which did not include the
+  flag (correct, on its inputs)
+
+The unsupported citation reached the user anyway. The information existed;
+it just never reached the component that could act on it. A check that
+nobody downstream acts on turns silent bad output into *logged* bad output.
+That is better, but it is not a fix.
+
+The lesson for a multi-agent graph: for every piece of information one agent
+produces, ask **which agent must act on it, and whether that agent actually
+receives it.** Ownership (Phase 6) makes each field have one writer. It says
+nothing about whether the right readers are wired to it. Part B wires the
+Writer's flag to the Critic.
 
 This applies directly ahead: **Part D** adds retry and fallback rules, each of
 which assumes something about why a call failed. **Part E**'s evaluators will

@@ -57,8 +57,8 @@ dispatched only if the Supervisor judged the problem to be a *writing* problem.
 An evidence problem goes to the Researcher first, and the Writer then revises
 from the merged notes.
 
-The Writer also records its own spend in `budgets["writer"]` (one per draft),
-and writes only that entry. See BUDGET_ENTRY_OWNERS.
+The Writer also records its own spend in `writer_budget` (one per model call),
+a field only it writes (Phase 7 Part B; was an entry in a shared dict).
 """
 
 from langchain_core.language_models import BaseChatModel
@@ -302,7 +302,7 @@ def make_writer(
         update = {
             "draft": draft,
             "unsupported_citations": issues,
-            "budgets": {"writer": {"used": used, "cap": max_calls}},
+            "writer_budget": {"used": used, "cap": max_calls},
         }
         if trims:
             update["writer_trims"] = [*(state.get("writer_trims") or []), *trims]

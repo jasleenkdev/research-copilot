@@ -130,7 +130,7 @@ def test_critic_recovers_after_one_invented_tool_call():
     model = ScriptedModel(RuntimeError(GROQ_ERROR), "APPROVE")
     out = build_critic(model=model, tools=[verify]).invoke(critic_input())
     assert out["verdict"] == "approve"
-    assert out["budgets"]["critic"]["used"] == 2
+    assert out["critic_budget"]["used"] == 2
     assert out["citation_checks"] == [{"arxiv_id": "2309.15217", "status": "found"}]
 
 

@@ -188,7 +188,11 @@ class AgentBudget(TypedDict, total=False):
 def merge_budgets(
     existing: dict[str, AgentBudget] | None, update: dict[str, AgentBudget] | None
 ) -> dict[str, AgentBudget]:
-    """The per-agent reducer for `budgets`.
+    """The per-agent reducer for the LEGACY `budgets` key (6.3 - Phase 7 A).
+
+    PHASE 7 PART B: kept only so that threads checkpointed with `budgets`
+    still load. Nothing writes `budgets` any more; each agent has its own
+    `<agent>_budget` field. See "why budgets became three fields" below.
 
     CONCEPT: a reducer that merges per agent, and per field
     Three agents and one reset site all write `budgets`. With the default
@@ -215,16 +219,51 @@ def merge_budgets(
     return merged
 
 
+# --------------------------------------------------------------------------
+# PHASE 7 PART B: why budgets became three fields
+# --------------------------------------------------------------------------
+# From 6.3 to Phase 7 A, budgets lived in one shared dict,
+# `budgets: {"researcher": {...}, "writer": {...}, "critic": {...}}`, merged
+# per agent by `merge_budgets`. Three agents and two reset sites wrote it.
+#
+# CONCEPT: the lost update
+# The Researcher and Critic are subgraphs, and a subgraph's output schema works
+# per *key*. Each read the whole dict, updated its own entry, and returned the
+# whole dict - its own entry, plus every other agent's entry exactly as it had
+# read it. One node at a time, that passthrough was a no-op. Run the two in
+# parallel and it is a lost update: both read {critic: 1}, the Critic writes
+# {critic: 2}, the Researcher's copy still says {critic: 1}, and whichever merge
+# lands second wins. Demonstrated with the real subgraphs before this change
+# (`tests/test_fanout_safety.py`): the Critic's spend came back as 1, not 2. No
+# error was raised; the number was just wrong.
+#
+# CONCEPT: why per-agent fields, and not a cleverer reducer
+#   a smarter merge   cannot tell a passthrough copy from a real update - both
+#                     are "the value of this entry"
+#   a delta reducer   (write +1, not the new total) makes passthrough worse:
+#                     returning the other agents' unchanged entries as deltas
+#                     would re-add them
+#   per-agent fields  `researcher_budget`, `writer_budget`, `critic_budget`,
+#                     each an ordinary field with one owner. A subgraph's
+#                     schema carries only its own, so there is nothing to pass
+#                     through, and two parallel agents never write the same key.
+# It is also simpler than what it replaces: `merge_budgets` stays only to load
+# old threads, and the entry-level ownership check in `owns()` is gone,
+# because ordinary per-field ownership now covers it.
+BUDGET_FIELDS: dict[str, str] = {agent: f"{agent}_budget" for agent in AGENTS}
+
+
 def budget_of(state: "MultiAgentState", agent: str, default_cap: int) -> AgentBudget:
     """An agent's budget entry, with defaults for anything missing.
 
-    This is how every reader gets a budget, and it is the migration path. A
-    thread checkpointed before 6.3 has no `budgets` key at all, and a thread
-    from partway through a turn may lack one agent's entry. Both read as
-    "nothing used, configured cap", which is exactly what an agent that has not
-    run this round has spent.
+    The ONLY sanctioned way to read a budget (see the README's note on
+    reducer-backed vs plain keys), and the migration path, in order:
+      1. `<agent>_budget` (Part B onwards)
+      2. the legacy `budgets[agent]` (threads from 6.3 - Phase 7 A)
+      3. nothing used, configured cap - a thread from before 6.3, or an agent
+         that has not run this round
     """
-    entry = (state.get("budgets") or {}).get(agent) or {}
+    entry = state.get(BUDGET_FIELDS.get(agent, "")) or (state.get("budgets") or {}).get(agent) or {}
     return {"used": entry.get("used", 0), "cap": entry.get("cap", default_cap)}
 
 
@@ -457,8 +496,18 @@ class MultiAgentState(TypedDict, total=False):
     # capped by `max_revisions`. Incremented only by `start_revision`, which is
     # also the single reset site for every agent's `budgets[...]["used"]`.
     revisions: int
-    # See AgentBudget and merge_budgets above. Each agent writes only its own
-    # entry. `start_revision` writes all of them (the reset).
+
+    # --- per-agent budgets (Phase 7 Part B; owner: each agent) -----------------
+    # One field per agent, each written by that agent - plus the two lifecycle
+    # resets (begin_turn per turn, start_revision per round). See "why budgets
+    # became three fields" above. Plain overwrite reducers: one writer at a
+    # time per field, by construction.
+    researcher_budget: AgentBudget
+    writer_budget: AgentBudget
+    critic_budget: AgentBudget
+    # LEGACY, read-only: 6.3 - Phase 7 A kept all three in this one dict.
+    # Declared so old checkpoints still load; `budget_of` falls back to it.
+    # Nothing writes it (no OWNERS entry lists it, so `owns()` would refuse).
     budgets: Annotated[dict[str, AgentBudget], merge_budgets]
 
 
@@ -494,8 +543,8 @@ class ResearcherInput(TypedDict, total=False):
     researcher_brief: str
     research_notes: str
     documents: list[Document]
-    # --- 6.3 --- its own budget entry, to know what is left this round
-    budgets: Annotated[dict[str, AgentBudget], merge_budgets]
+    # --- 6.3 / Part B --- its own budget, to know what is left this round
+    researcher_budget: AgentBudget
     # --- Phase 7 --- its own earlier trims this turn, to append to
     researcher_trims: list[TrimRecord]
 
@@ -514,7 +563,7 @@ class ResearcherOutput(TypedDict, total=False):
     documents: list[Document]
     research_iterations: int
     research_outcome: ResearchOutcome | Literal[""]
-    budgets: Annotated[dict[str, AgentBudget], merge_budgets]
+    researcher_budget: AgentBudget
     researcher_trims: list[TrimRecord]
 
 
@@ -537,8 +586,12 @@ class CriticInput(TypedDict, total=False):
     sub_questions: list[str]
     draft: str
     research_notes: str
-    budgets: Annotated[dict[str, AgentBudget], merge_budgets]
+    critic_budget: AgentBudget
     critic_trims: list[TrimRecord]
+    # Part B: what the Writer's own check found in this draft - citations that
+    # are not in the research notes. The coordination gap E2E01 exposed: the
+    # Writer flagged one, the Critic approved without ever being told.
+    unsupported_citations: list[str]
 
 
 class CriticOutput(TypedDict, total=False):
@@ -547,7 +600,7 @@ class CriticOutput(TypedDict, total=False):
     critique: str
     verdict: Verdict | Literal[""]
     citation_checks: list[CitationCheck]
-    budgets: Annotated[dict[str, AgentBudget], merge_budgets]
+    critic_budget: AgentBudget
     critic_trims: list[TrimRecord]
 
 
@@ -572,12 +625,13 @@ OWNERS: dict[str, frozenset[str]] = {
     "plan_question": frozenset({"sub_questions"}),
     # Must match ResearcherOutput exactly. tests/test_multi_agent.py checks it.
     "researcher": frozenset(ResearcherOutput.__annotations__),
-    # 6.3: and its own `budgets` entry - see BUDGET_ENTRY_OWNERS.
-    "writer": frozenset({"draft", "budgets", "unsupported_citations", "writer_trims"}),
+    # Part B: its own budget field (was: its entry in the shared `budgets`).
+    "writer": frozenset({"draft", "writer_budget", "unsupported_citations", "writer_trims"}),
     # Must match CriticOutput exactly, same check as the Researcher.
     "critic": frozenset(CriticOutput.__annotations__),
     "review_draft": frozenset({"human_verdict", "human_feedback", "human_edit"}),
-    "start_revision": frozenset({"revisions", "budgets"}),
+    # The per-round reset: every agent's budget field (Part B).
+    "start_revision": frozenset({"revisions", *BUDGET_FIELDS.values()}),
     "finalize_answer": frozenset({"messages"}),
     # 6.2. Routing fields only. The Supervisor can read everything and write
     # nothing that an agent produces.
@@ -587,22 +641,10 @@ OWNERS: dict[str, frozenset[str]] = {
 }
 
 
-# 6.3: ownership one level down. For the shared `budgets` dict, which *entries*
-# each writer may touch. `start_revision` is the reset site, so it writes all
-# of them. Everyone else writes only their own.
-BUDGET_ENTRY_OWNERS: dict[str, frozenset[str]] = {
-    "researcher": frozenset({"researcher"}),
-    "writer": frozenset({"writer"}),
-    "critic": frozenset({"critic"}),
-    "start_revision": frozenset(AGENTS),
-}
-
-
 def _register_turn_boundary(fields) -> None:
     """Called once by multi_agent_graph.py with `per_turn_reset()`'s keys, so the
     reset list is written in one place and the ownership table follows it."""
     OWNERS["begin_turn"] = frozenset(fields)
-    BUDGET_ENTRY_OWNERS["begin_turn"] = frozenset(AGENTS)
 
 
 class OwnershipError(RuntimeError):
@@ -623,21 +665,12 @@ def owns(node_name: str) -> Callable[[Callable], Callable]:
     ownership entry and the graph's node name are visibly the same string at
     the one place they meet.
 
-    6.3 extends the check into `budgets`: a plain node may write only the
-    entries BUDGET_ENTRY_OWNERS gives it.
-
-    CONCEPT (6.3): where sub-key ownership stops being enforceable - subgraphs
-    The Researcher and Critic subgraphs are not wrapped (see 6.1), and their
-    output_schema works at *key* granularity. A subgraph that reads `budgets`
-    and updates its own entry returns the *whole* dict as its output: the
-    other agents' entries come back as passthrough, unchanged. Under
-    `merge_budgets` that passthrough rewrites those entries with the values
-    they already had, a no-op, because this graph runs one node at a time. It
-    would stop being a no-op the day two branches run in parallel (Phase 7's
-    fan-out). Then a stale passthrough copy could overwrite a concurrent
-    update. The fix at that point is a per-agent key or a delta reducer, not a
-    cleverer merge. `test_subgraph_budget_passthrough_leaves_other_entries_alone`
-    pins down the current, sequential behaviour.
+    Part B note: 6.3 extended this check into the entries of the shared
+    `budgets` dict, and documented that subgraphs could not be held to it - their
+    output schemas work per key, so they passed other agents' entries through.
+    That is the lost update Part B fixed by giving each agent its own budget
+    field. With one field per agent, this ordinary per-field check is the whole
+    rule again.
     """
     allowed = OWNERS[node_name]
 
@@ -653,15 +686,6 @@ def owns(node_name: str) -> Callable[[Callable], Callable]:
                     "agent needs this value, it belongs in a field this node "
                     "owns and the other agent should read it from there."
                 )
-            # 6.3: the same rule inside `budgets`, per entry.
-            if "budgets" in update:
-                entries = BUDGET_ENTRY_OWNERS.get(node_name, frozenset())
-                foreign = set(update["budgets"] or {}) - entries
-                if foreign:
-                    raise OwnershipError(
-                        f"node {node_name!r} wrote budget entries {sorted(foreign)}, "
-                        f"which it does not own. It may write only {sorted(entries)}."
-                    )
             return update
 
         return checked

@@ -154,7 +154,7 @@ from research_copilot.request_budget import (
 )
 from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
 from research_copilot.models import get_chat_model
-from research_copilot.multi_agent_state import ResearcherInput, ResearcherOutput, budget_of
+from research_copilot.multi_agent_state import AgentBudget, ResearcherInput, ResearcherOutput, budget_of
 from research_copilot.retrieval import format_docs, get_retriever
 from research_copilot.tools import search_arxiv
 
@@ -165,7 +165,7 @@ from research_copilot.tools import search_arxiv
 #
 # 6.3: the cap is per *revision round*, across every Researcher invocation in
 # that round, and no longer per invocation. The round total is
-# `budgets["researcher"]["used"]` in the parent state, and `start_revision`
+# `researcher_budget["used"]` in the parent state, and `start_revision`
 # resets it. A Researcher sent back twice in one round shares one budget
 # between the two passes. Before 6.3 each pass got a fresh one, the gap flagged
 # at the bottom of multi_agent_graph.py.
@@ -335,10 +335,11 @@ def build_researcher(
             + state.get("research_iterations", 0)
         )
 
-    def budget_update(state: ResearcherState) -> dict:
+    def budget_update(state: ResearcherState) -> AgentBudget:
         """This agent's own `budgets` entry, and only its own (see
-        BUDGET_ENTRY_OWNERS). The merge reducer leaves the other entries alone."""
-        return {"researcher": {"used": spent(state), "cap": max_iterations}}
+        Phase 7 Part B: its own field, so there is nothing of any other agent's
+        to pass through - the lost update the shared dict allowed."""
+        return {"used": spent(state), "cap": max_iterations}
 
     def _merge(previous: str, new: str, brief: str) -> str:
         """Merge-on-rerun for text notes: append, never rewrite."""
@@ -392,7 +393,7 @@ def build_researcher(
             "research_outcome": "findings" if found_new else "nothing_found",
             # No model calls on this path, so the entry is unchanged. It is
             # still written, so that the entry's cap is recorded in state.
-            "budgets": budget_update(state),
+            "researcher_budget": budget_update(state),
         }
 
     def research_model(state: ResearcherState) -> dict:
@@ -542,7 +543,7 @@ def build_researcher(
 
     def compile_notes(state: ResearcherState) -> dict:
         """The loop's hand-over, plus this pass's spend recorded in `budgets`."""
-        return {**_compile_notes(state), "budgets": budget_update(state)}
+        return {**_compile_notes(state), "researcher_budget": budget_update(state)}
 
     def _compile_notes(state: ResearcherState) -> dict:
         """Turn the private loop's end state into the fields that leave it.

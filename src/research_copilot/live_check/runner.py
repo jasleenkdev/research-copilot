@@ -253,7 +253,8 @@ def _run_critic(s: Scenario, cfg):
         tools = [cfg.verify_tool or verify_citation]
 
     critic = build_critic(model=_model(cfg), tools=tools)
-    out = critic.invoke({"question": sc.QUESTION, "draft": s.inputs["draft"], "research_notes": sc.NOTES})
+    out = critic.invoke({"question": sc.QUESTION, "draft": s.inputs["draft"], "research_notes": sc.NOTES,
+                         "unsupported_citations": s.inputs.get("unsupported_citations", [])})
     checks_by_id = {c["arxiv_id"]: c["status"] for c in out.get("citation_checks", [])}
     checks = {"verdict": out.get("verdict") == s.expect["verdict"],
               "used_verify_citation": bool(out.get("citation_checks"))}
@@ -442,7 +443,8 @@ def _run_e2e(s: Scenario, cfg):
          "routes": [(e["proposed"], e["routed_to"], e["override"]) for e in log],
          "rationales": [e["rationale"] for e in log],
          "dispatches": state.get("dispatches"), "revisions": state.get("revisions"),
-         "verdict": state.get("verdict"), "budgets": state.get("budgets"),
+         "verdict": state.get("verdict"),
+         "budgets": {agent: state.get(f"{agent}_budget") for agent in ("researcher", "writer", "critic")},
          "calls": [{k: v for k, v in c.items() if k != "run_id"} for c in recorder.calls],
          "largest_request": max((c["est_tokens"] for c in recorder.calls), default=0),
          "trims": [*(state.get("researcher_trims") or []), *(state.get("writer_trims") or []),
