@@ -1726,3 +1726,37 @@ The SDK's retry count, calibrated here: with 2 a live streamed run died on a
 per-minute 429, and with 6 it completed after 10 retries in all. The default
 is now 6 (`RESEARCH_COPILOT_SDK_MAX_RETRIES` overrides it); see the
 falsified-assumptions table for why that does not undo Part D.
+
+### Part E1: the dataset, and what an evaluator may read
+
+`evaluation/dataset.py` turns the 39 live-check scenarios into `Example`s.
+The scenarios stay the single source; examples are derived from them. Each
+example adds:
+
+- **a typed `reference`** per kind. A key the schema does not know is an
+  error, and migration fails on any `expect` key it cannot map, so no
+  expectation is dropped on the way. The checks Part A applied without
+  writing them down are now written in the reference. End-to-end runs gain
+  `no_unsupported_citations`, the defect E2E01 actually delivered.
+- **provenance**: `source` (hand_crafted / captured / scaled_variant) and
+  `designed_after`, taken from git history. 14 of the 39 are not
+  pre-registered: the controls, CRT07-CRT10, and the Supervisor examples whose
+  premise facts came after day one. A score on those is weaker evidence, and
+  the report will say so.
+- **explicit relations**: `control_of` (SUPC* -> SUP*, CRT08 -> CRT07, CRT10 ->
+  CRT09) and `scale_of` (CRT09 -> CRT07, CRT10 -> CRT08), with `scale`
+  *measured* from the inputs (13 citations vs 2).
+- **two fingerprints**: `example_hash` (kind, inputs, reference) decides which
+  samples are comparable, and adding an example leaves the others' hashes
+  alone. `dataset_version` names the whole set. Notes and titles are in
+  neither, so rewording a note does not reset collected samples.
+
+`evaluation/record.py` builds the **EvalRecord**, the only input an evaluator
+gets. It is the standing rule applied to a new observer: named fields from the
+final state, `astream_run`'s normalised events (never raw `astream_events`,
+which it refuses), and the runner's counters, with nested entries
+allow-listed too. The private keys are *derived* from the agents' state
+schemas (in neither the input nor the output contract), so a private key
+added later is covered by the leak test automatically. The run's ending
+(`done` / `stopped` / `error` / `paused`) is recorded as data, because E2
+needs it to separate infrastructure failure from behaviour.
