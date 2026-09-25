@@ -1209,20 +1209,31 @@ Details, per-run reports and the hand reviews are in `docs/live_check/`; start a
    Still open: it restates facts its notes already hold instead of answering
    `NOTHING NEW` (RES02, every run), and showing it the remaining budget did
    not reduce its searching.
-5. **Writer.** **Verified on Groq**: 4/4. It cites only the notes, admits
-   empty notes, and drops flagged citations. Found end to end: gpt-oss writes
-   its own citation markup (`【1†L1-L7】`), which points at nothing. Now caught
-   by `unsupported_citations` (one retry, then recorded), not normalised.
+5. **Writer.** **Verified on Groq for isolated scenarios, open end to end.**
+   4/4 alone: it cites only the notes, admits empty notes, and drops flagged
+   citations. End to end it did worse:
+   - gpt-oss wrote its own citation markup (`【1†L1-L7】`), which points at
+     nothing. Now caught by `unsupported_citations` (one retry, then
+     recorded), not normalised.
+   - E2E01's confirming run delivered a real paper, arXiv 2408.12398, that
+     the notes did not contain. The check fired and the retry did not remove
+     it. Detection now works; *acting* on the detection does not yet
+     (see item 6).
 6. **Critic.** **Verified on Groq**: 6/6, twice, the second time after the
    redesign below. It reads lookup titles (spots "Attention Is All You Need"
    cited as RAGAS), ignores ERROR, and catches fake, malformed and
    misattributed ids. Redesigned after E2E01: citation lookups are now code,
-   not model-invoked tool calls, so a review costs one model call.
-7. **Cost and latency.** **Measured on Groq.** A full run with the Critic cost
-   ~70k tokens and 7.5 min before the redesign (mostly per-minute rate-limit
-   waits) and delivered nothing. Without the Critic: 14k tokens, 57 s. **The
-   confirming run after the fixes is pending**: it hit Groq's daily token
-   limit mid-run (see the Phase 7 section below).
+   not model-invoked tool calls, so a review costs one model call. **Open:**
+   it approved E2E01's final draft despite the unsupported citation in item 5.
+   It checks that each cited paper *exists*, but it is not shown the Writer's
+   "not in the notes" flag, and it did not notice on its own.
+7. **Cost and latency, and whether a full run works at all.** **Verified on
+   Groq.** E2E01 with the Critic delivered nothing before the fixes (70k
+   tokens, 7.5 min, withheld). After them: an approved answer in one pass (0
+   revisions, no fallbacks), 48k tokens, 4.8 min, 12 model calls, with the
+   Critic taking 1 of them. Without the Critic: 14k tokens, 57 s. The largest
+   single request was the Researcher's 5th call, at ~6,000 tokens (the
+   per-request limit is below).
 8. **Real arXiv.** **Verified.** A well-formed id that does not exist returns an
    empty feed, which reads as NOT FOUND, as assumed. The shared 3-second
    throttle held with both tools active.
@@ -1343,6 +1354,23 @@ What follows from it:
   `incomplete` for the first. It is not an approval, and it no longer spends a
   revision or forces a rewrite.
 
+The same pattern turned up four more times in Part A, in code as well as in
+prompts:
+
+| Assumption | Where | Falsified by |
+| --- | --- | --- |
+| every rejection is about the content | the 6.3 rewrite guard | E2E01: an unfinished review |
+| the model stops searching when it has enough | the Researcher's loop | gpt-oss: 5 searches for one paper, every time |
+| `tool_choice="none"` means no tool call | the reserved final call, first version | gpt-oss called the tool anyway |
+| a provider counts `max_tokens` against its limits | my headroom probe | Groq: the probe passed with ~1k free |
+| a request cannot outgrow the provider's ceiling | every agent, since Phase 6 | a 413 at 8,849 tokens |
+
+And one where the fix was a *detector* but nothing acted on what it found:
+E2E01's confirming run delivered a citation the notes did not contain,
+after the Writer's check had flagged it and the Supervisor had read the flag.
+A check that nobody downstream acts on turns silent bad output into logged
+bad output. That is better, but it is not a fix.
+
 This applies directly ahead: **Part D** adds retry and fallback rules, each of
 which assumes something about why a call failed. **Part E**'s evaluators will
 encode what "correct" means. A wrong evaluator does not fail loudly: it scores
@@ -1380,8 +1408,45 @@ be built on unverified claims.
   - the Supervisor's premise check
   - the Critic's code-side lookups and `incomplete` verdict
   - the Writer's unsupported-citation check
+- **Request size is capped, per provider** (`request_budget.py`). Found by a
+  413 on Groq, but the gap exists on every provider. Each agent sizes its
+  request before sending it and cuts only its variable content (search
+  results, notes - never the draft being judged). Every cut is logged in state
+  (`researcher_trims`, `writer_trims`, `critic_trims`) and shown to the
+  Supervisor. A provider refusal gets one retry at 70%.
+- **Every model call is recorded in live runs** (`CallRecorder`): agent, node,
+  estimated size, outcome, kept even when the run dies.
 - **Provider limits are the provider's to report.** Groq's per-day limit
   refills continuously, is shared across everything using the key, and counted
   fewer tokens than our records (cached input likely excluded). The harness's
   budget caps a run; Groq's 429 is the only authority on what is left, and the
   runner now parses it into one line.
+
+### Part A: closed
+
+Every fix, and the live run that confirmed it (Groq `openai/gpt-oss-120b`):
+
+| Finding | Fix | Confirmed by |
+| --- | --- | --- |
+| an invented tool call (`open_file`) killed the run | `resilience.py`: one hinted retry, then degrade | 10 Researcher calls with no crash (v2) |
+| wrong-premise Supervisor rationales | "check the critique against the state" | SUP04/SUP08: wrong premise 2 → 0 (v2) |
+| the Researcher never ended its loop | a reserved final call with **no tools**, results as text | RES01 passes (v4) |
+| the Critic spent its budget on lookups; "did not finish" became a rejection | code-side lookups; an `incomplete` verdict | CRT 6/6 at ~1k tokens (v5); E2E01 approved in one pass (v6) |
+| gpt-oss citation markup in answers | `unsupported_citations` check with one retry | unit-tested; fired live in E2E01 (v6) |
+| one request outgrew the provider's ceiling (413) | per-request size limit, trims logged | E2E01: largest request ~6,000 under a 6,500 limit (v6) |
+
+Still open, carried forward:
+
+- **An unsupported citation reached the user** (E2E01 v6). Detected, not acted
+  on: the Critic never sees the flag.
+- **The Researcher restates what its notes already hold** instead of NOTHING
+  NEW (RES02).
+- **Scope creep, and gap-vs-critique priority**, in the Supervisor.
+- **Single-sample variance** in item 2, for Part E's repeated-run scoring.
+- **Item 1**, pending an Anthropic key.
+- **The 413's exact node was never directly recorded.** That run predates the
+  call recorder. The evidence points to the Researcher's tool loop: its
+  requests grow with every search (404 → 2,539 → 3,636 → 5,741 → 6,010
+  tokens in v6), they are the largest in the run, and the failed run's
+  22.5k tokens spent match its 5th-6th call. Any future oversize request
+  will be named directly.

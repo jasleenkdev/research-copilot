@@ -1,8 +1,10 @@
 # Part A live verification: summary (Groq, openai/gpt-oss-120b)
 
-Two days, four result files, one provider. Read with the per-run reports beside it:
+Two days, six result files, one provider. Read with the per-run reports beside it:
 `groq-gpt-oss-120b-day1.md` (baseline), `-v2.md` (after the premise fix), `-v4.md`
-(after the Researcher fixes). Raw JSONL is under `data/live_check/` (gitignored).
+(after the Researcher fixes), `-v5.md` (the redesigned Critic), `-v6.md` (E2E01
+confirmed after the request-size limit). The README's "Part A: closed" section
+lists every fix with its confirming run. Raw JSONL is under `data/live_check/` (gitignored).
 
 **What these results are evidence of:** prompt and logic quality on one open model.
 **What they are not evidence of:** anything Anthropic-specific. Item 1 is pending.
@@ -17,7 +19,7 @@ Two days, four result files, one provider. Read with the per-run reports beside 
 | 4 Researcher | RES01 pass, RES02 fail (v4) | Stops only via the reserved final call; restates known facts instead of NOTHING NEW |
 | 5 Writer | 4/4 (day one) | E2E02 shows gpt-oss citation markup leaking into user-facing answers |
 | 6 Critic | 6/6 | Reads lookup titles, ignores ERROR, catches fake/malformed/misattributed ids |
-| 7 end to end | E2E01 **withheld**, E2E02 answered | See "the E2E01 failure" |
+| 7 end to end | **E2E01 approved in one pass (v6)**; E2E02 answered | Before the fixes, E2E01 was withheld after 70k tokens; after them, 48k tokens, 0 revisions |
 | 8 real arXiv | pass | Nonexistent id -> empty feed -> NOT FOUND (as assumed); shared throttle held |
 
 ## Findings, by kind
@@ -33,7 +35,20 @@ Two days, four result files, one provider. Read with the per-run reports beside 
 4. **Harness bugs** (not model failures): gap-admission regex (curly apostrophes), a vacuous
    "cites only notes" check, and rescored records dropping their token counts.
 
-### Open, and needing a decision
+### Fixed after this summary was first written
+- E2E01's two defects: the Critic's lookups are now code, and "incomplete" is a verdict
+  of its own. Confirmed: CRT 6/6 at ~1k tokens (v5), and E2E01 approved (v6).
+- The Writer's citation check (markup and foreign ids).
+- A per-request size limit, after a 413 at 8,849 tokens. The v6 run's largest request
+  was ~6,000 tokens, with no trim needed.
+
+### New from the v6 run
+- **An unsupported citation reached the user.** arXiv 2408.12398 was not in the notes.
+  The Writer's check fired, the Supervisor read the flag and wanted research, a
+  budget guard sent the run to the Critic, and the Critic approved. Detection works;
+  nothing acts on it yet.
+
+### Open, and needing a decision (as first written)
 5. **E2E01: a guard overruled a correct Supervisor.** The Critic's per-round budget (4 calls)
    covers about 3 citation checks, one per call on gpt-oss. The resulting fail-closed "reject" is
    procedural, but the graph treats it as a content rejection: it spends a revision, and the 6.3

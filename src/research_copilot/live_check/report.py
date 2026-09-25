@@ -170,6 +170,8 @@ def render(results: dict[str, dict], *, limits: dict | None = None,
                 if o.get("failed_call"):
                     fc = o["failed_call"]
                     lines.append(f"      FAILED CALL: {fc['agent']}/{fc['node']} (~{fc['est_tokens']} tokens)")
+                if o.get("unsupported_citations"):
+                    lines.append(f"      UNSUPPORTED CITATIONS IN THE ANSWER: {o['unsupported_citations']}")
                 for t in o.get("trims") or []:
                     lines.append(f"      TRIMMED: {t['node']} {t['part']} {t['tokens_before']}->{t['tokens_after']} (limit {t['limit']})")
     return "\n".join(lines) + "\n"

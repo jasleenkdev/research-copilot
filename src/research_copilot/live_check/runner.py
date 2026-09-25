@@ -446,7 +446,12 @@ def _run_e2e(s: Scenario, cfg):
          "calls": [{k: v for k, v in c.items() if k != "run_id"} for c in recorder.calls],
          "largest_request": max((c["est_tokens"] for c in recorder.calls), default=0),
          "trims": [*(state.get("researcher_trims") or []), *(state.get("writer_trims") or []),
-                   *(state.get("critic_trims") or [])]},
+                   *(state.get("critic_trims") or [])],
+         # Added after E2E01's confirming run delivered a citation the notes did
+         # not contain, and the result could not show it directly.
+         "unsupported_citations": state.get("unsupported_citations") or [],
+         "citation_checks": state.get("citation_checks") or [],
+         "research_notes": state.get("research_notes", "")},
         {"finished": bool(state.get("messages")) and state["messages"][-1].type == "ai",
          "no_fallbacks": not any(e["override"] == "fallback to fixed policy" for e in log)},
         True,
