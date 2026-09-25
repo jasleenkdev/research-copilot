@@ -44,7 +44,12 @@ AGENTS = ("researcher", "writer", "critic", "supervisor")
 LOG_ENTRY_KEYS = ("step", "proposed", "routed_to", "override", "rationale", "brief", "revision")
 CITATION_CHECK_KEYS = ("arxiv_id", "status")
 INTERVENTION_KEYS = ("node", "kind", "part", "tokens_before", "tokens_after", "limit", "detail")
-TOOL_KEYS = ("agent", "name", "arg")
+# A tool call as an evaluator sees it: the identifying argument, whether the
+# tool itself reported a failure, and the arXiv ids its result contained -
+# never the result text, which is the private channel's content (E2).
+TOOL_KEYS = ("agent", "name", "arg", "status", "result_ids")
+# Portability probes (items 0 / 1g) return text or a parsed object, not state.
+PROBE_KEYS = ("answer", "parsed", "method", "strict", "parsing_error", "field_order")
 CALL_KEYS = ("agent", "node", "est_tokens", "status")
 ENDING_KEYS = ("type", "reason", "kind", "detail")
 RUNNER_KEYS = ("tokens", "sdk_retries", "seconds")
@@ -68,6 +73,7 @@ class EvalRecord(TypedDict, total=False):
     revisions: int
     interventions: list[dict]
     tools: list[dict]
+    probe: dict
     calls: list[dict]
     ending: dict
     tokens: int
@@ -109,6 +115,28 @@ def _answer(state: Mapping) -> str:
     return state.get("draft") or ""
 
 
+def ending_for(exc: BaseException) -> dict:
+    """How a run ended, given the exception that ended it.
+
+    The one place this is decided, for both paths: `streaming.astream_run`
+    (whole-graph runs) and a single agent invoked directly (evaluation.execute),
+    which has no stream to report it. Expected provider-side conditions are
+    `stopped`; anything else is `error` with classify()'s kind, which E2 reads
+    to tell a rate limit from our own bug.
+    """
+    from research_copilot.models import ModelNotAvailable
+    from research_copilot.resilience import QuotaExhausted, classify
+
+    if isinstance(exc, QuotaExhausted):
+        from research_copilot.live_check.runner import describe_rate_limit
+
+        return {"type": "stopped", "reason": "quota_exhausted",
+                "detail": describe_rate_limit(str(exc)) or str(exc)[:300]}
+    if isinstance(exc, ModelNotAvailable):
+        return {"type": "stopped", "reason": "model_not_available", "detail": str(exc)}
+    return {"type": "error", "kind": classify(exc), "detail": f"{type(exc).__name__}: {str(exc)[:300]}"}
+
+
 def _ending(events: list[dict], ending: Mapping | None) -> dict:
     if ending is not None:
         picked = _pick(ending, ENDING_KEYS)
@@ -127,11 +155,16 @@ def build_eval_record(
     *,
     events: Iterable[dict] = (),
     calls: Iterable[Mapping] = (),
+    tool_calls: Iterable[Mapping] | None = None,
     ending: Mapping | None = None,
     **runner: Any,
 ) -> EvalRecord:
     """An EvalRecord from a run's final state (or one agent's output), the
     normalised events of `streaming.astream_run`, and the runner's counters.
+
+    `tool_calls` (from evaluation.execute.ToolRecorder) replaces the tool
+    events when given: it adds each call's status and result ids, which the
+    stream does not carry.
 
     Raw `astream_events` are refused: they carry the private channels (Part C).
     """
@@ -162,9 +195,14 @@ def build_eval_record(
                      for agent in AGENTS for i in (state.get(f"{agent}_interventions") or [])]
     if interventions:
         record["interventions"] = interventions
-    tools = [_pick(e, TOOL_KEYS) for e in events if e["type"] == "tool" and e.get("phase") == "start"]
+    if tool_calls is not None:
+        tools = [_pick(t, TOOL_KEYS) for t in tool_calls]
+    else:
+        tools = [_pick(e, TOOL_KEYS) for e in events if e["type"] == "tool" and e.get("phase") == "start"]
     if tools:
         record["tools"] = tools
+    if state.get("probe"):
+        record["probe"] = _pick(state["probe"], PROBE_KEYS)
     calls = [_pick(c, CALL_KEYS) for c in calls]
     if calls:
         record["calls"] = calls

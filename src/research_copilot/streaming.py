@@ -70,7 +70,7 @@ from collections.abc import AsyncIterator, Iterable
 from langchain_core.runnables import Runnable
 
 from research_copilot.models import ModelNotAvailable
-from research_copilot.resilience import INTERVENTION_EVENT, QuotaExhausted, classify
+from research_copilot.resilience import INTERVENTION_EVENT, QuotaExhausted
 
 # The top-level agents a `node` event is reported for. The other nodes
 # (begin_turn, prune_history, plan_question, start_revision, review_draft,
@@ -131,6 +131,8 @@ async def astream_run(
     `.invoke()`. With a checkpointer, `config` names the thread, and a run that
     parks at the human gate ends with a `paused` event.
     """
+    from research_copilot.evaluation.record import ending_for
+
     token_agents = frozenset(token_agents)
     final_state: dict | None = None
     try:
@@ -186,16 +188,15 @@ async def astream_run(
                        "agent": agent, "name": name,
                        **({"arg": str(inputs.get(arg, ""))} if arg and kind == "on_tool_start" else {})}
                 continue
-    except QuotaExhausted as exc:
-        yield {"type": "stopped", "reason": "quota_exhausted", "detail": _limit_line(exc)}
-        return
-    except ModelNotAvailable as exc:
-        yield {"type": "stopped", "reason": "model_not_available", "detail": str(exc)}
+    except (QuotaExhausted, ModelNotAvailable) as exc:
+        # E2: the ending is decided in one place (evaluation.record.ending_for),
+        # shared with single-agent runs that have no stream.
+        yield ending_for(exc)
         return
     except Exception as exc:
         # Report, then re-raise: a consumer sees *something*, and our own bugs
         # stay loud (module doc: "two kinds of ending").
-        yield {"type": "error", "kind": classify(exc), "detail": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        yield ending_for(exc)
         raise
 
     if config is not None and getattr(graph, "checkpointer", None) is not None:
@@ -206,8 +207,3 @@ async def astream_run(
     if final_state is not None:
         yield _done(final_state)
 
-
-def _limit_line(exc: BaseException) -> str:
-    from research_copilot.live_check.runner import describe_rate_limit
-
-    return describe_rate_limit(str(exc)) or str(exc)[:300]

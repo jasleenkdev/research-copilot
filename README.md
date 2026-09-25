@@ -1455,6 +1455,27 @@ In practice: whatever leaves the process goes through an allow-list
 evaluators), and each new observer gets its own leak test, the way
 `tests/test_streaming.py` has one for events.
 
+**Every leak guard needs two tests, and the second is the one that proves it.**
+E1 found this by breaking its own filter on purpose. With `research_messages`
+added to the EvalRecord's allowed fields, the test that runs a real graph and
+checks the record still *passed*. The parent graph's state never contains the
+private keys, so that run never sent anything private towards the filter.
+Only the second test, which hands the builder a state with private keys
+injected, failed.
+
+| Test | What it proves | What it cannot prove |
+| --- | --- | --- |
+| real run: nothing private in the output | the normal path is clean today | that the guard works: if nothing private reaches it, a broken guard passes |
+| adversarial input: private content injected directly at the guard | the guard removes it | that the real path is wired through the guard |
+
+This generalises past leaks: **a test that only exercises the happy path can
+pass while the safety mechanism it is meant to cover is broken, if the happy
+path never stresses that mechanism.** A guard is proven only by a test that
+feeds it the thing it guards against. So every observer on the standing
+rule's list - tracers, Studio, API endpoints, evaluators - gets both, and each
+pair is checked the way E1's was: break the guard, and confirm the
+adversarial test is the one that fails.
+
 ## Lesson: a fallback must never be broad enough to swallow our own bugs
 
 **The principle:** every fallback, catch-all and "degrade gracefully" path
@@ -1760,3 +1781,46 @@ schemas (in neither the input nor the output contract), so a private key
 added later is covered by the leak test automatically. The run's ending
 (`done` / `stopped` / `error` / `paused`) is recorded as data, because E2
 needs it to separate infrastructure failure from behaviour.
+
+### Part E2: samples, outcomes, and scoring many runs
+
+A sample is one execution of one example (`evaluation/execute.py`), stored
+append-only as an EvalRecord (`evaluation/samples.py`). Scores are computed
+when results are read (`evaluation/aggregate.py`), so a changed evaluator
+re-scores history without another model call.
+
+**Comparable samples** share `example_hash` (what was asked) and `config_fp`:
+provider, model, fallback model, SDK retries, request-size ceiling, and a hash
+of the behaviour-bearing source files. A README or report commit does not
+reset samples; any change to an agent, prompt, tool or transport does. A file
+added later counts as behavioural unless it is listed as not.
+
+**Each sample gets an outcome before it is scored:**
+
+| Outcome | When | Scored? | Counts towards n? |
+| --- | --- | --- | --- |
+| measured | finished, nothing external changed what it did | yes | yes |
+| infra | spent quota, rate limit past the SDK's retries, missing model, arXiv failing, the fallback model answering, **or a 429 the Supervisor turned into a `fixed_policy` route** | no, reported as reliability | no |
+| crash | any other error, most likely ours | yes, as a failure | yes, and the session stops loudly |
+
+The fixed-policy row was found while building E2. With the real per-minute
+429 body, the Supervisor's handler routes on `fixed_policy`, the run ends
+normally, and on SUP01 the route it picks is lenient-correct: a rate limit
+scored as good judgement. The logged rationale is the only trace, so that is
+what the outcome rule reads.
+
+Single-agent runs have no stream to report how they ended, so `execute` catches
+the exception itself and records it with the same `ending_for()` the stream
+uses. That is tested with the real 429 and daily-limit bodies through the
+real SDK.
+
+**The scheduler** runs the example with the fewest counted samples next, so a
+day cut short still leaves coverage even. It stops on the first infra outcome
+and resumes the next day.
+
+**Aggregation** gives k/n with a 95% Wilson interval and four classes:
+insufficient, stable_pass, flaky, stable_fail. A second finding, from the
+interval test: **at n=3, even 3/3 against 0/3 overlaps** ([0.44, 1] against
+[0, 0.56]). Three samples are enough to classify one example. They can never
+show that two configurations differ on a single example. That takes pooling
+across examples, or n=5 on the ones that matter (5/5 against 0/5 separates).

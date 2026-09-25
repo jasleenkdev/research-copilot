@@ -137,6 +137,9 @@ class Example:
     # A provider this example can only be answered on ("" = any). A run on
     # another provider records it as pending, never as a pass or a fail.
     provider_only: str = ""
+    # A tool the example breaks on purpose (CRT05 stubs verify_citation to
+    # fail). Its failures are the test, so they are not counted as an outage.
+    injects_failure: str = ""
     label_disputed: str = ""
     note: str = ""
     est_tokens: int = 3000
@@ -205,6 +208,7 @@ def from_scenario(s: Scenario) -> Example:
         reference=reference_of(s), source=p.source, designed_after=p.designed_after,
         control_of=p.control_of, scale_of=p.scale_of, scale=measure_scale(inputs),
         provider_only="anthropic" if s.item in ANTHROPIC_ONLY_ITEMS else "",
+        injects_failure="verify_citation" if s.inputs.get("lookup") == "error" else "",
         label_disputed=s.label_disputed, note=s.note, est_tokens=s.est_tokens,
     )
 
