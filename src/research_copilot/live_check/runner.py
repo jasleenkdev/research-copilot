@@ -29,6 +29,7 @@ need checking against these human reads.
 """
 
 import json
+import logging
 import re
 import time
 from collections import deque
@@ -136,6 +137,48 @@ def describe_rate_limit(error: str) -> str | None:
 
 
 # ----------------------------------------------------------------- pacing
+
+
+def classify_error(error: str) -> str:
+    """classify() for a recorded error string (the runner stores text)."""
+    from research_copilot.resilience import classify
+
+    return classify(RuntimeError(error))
+
+
+class _SdkRetryCounter(logging.Handler):
+    """Counts the provider SDK's own retries during one scenario (Part D, row A).
+
+    The Groq and Anthropic SDKs both log "Retrying request to ... in N seconds"
+    at INFO before each retry. Nothing else in the project sees those retries,
+    so without this the ownership table's row A - per-minute 429s, owned by the
+    SDK - could not be measured at all.
+    """
+
+    LOGGERS = ("groq._base_client", "anthropic._base_client")
+
+    def __init__(self):
+        super().__init__(level=logging.INFO)
+        self.count = 0
+        self._saved: list = []
+
+    def emit(self, record):
+        if "Retrying request" in record.getMessage():
+            self.count += 1
+
+    def __enter__(self):
+        for name in self.LOGGERS:
+            logger = logging.getLogger(name)
+            self._saved.append((logger, logger.level))
+            logger.setLevel(logging.INFO)
+            logger.addHandler(self)
+        return self
+
+    def __exit__(self, *exc):
+        for logger, level in self._saved:
+            logger.removeHandler(self)
+            logger.setLevel(level)
+        return False
 
 
 def _pace(cfg: RunConfig, estimate: int) -> float:
@@ -450,8 +493,8 @@ def _run_e2e(s: Scenario, cfg):
          "budgets": {agent: state.get(f"{agent}_budget") for agent in ("researcher", "writer", "critic")},
          "calls": [{k: v for k, v in c.items() if k != "run_id"} for c in recorder.calls],
          "largest_request": max((c["est_tokens"] for c in recorder.calls), default=0),
-         "trims": [*(state.get("researcher_trims") or []), *(state.get("writer_trims") or []),
-                   *(state.get("critic_trims") or [])],
+         "interventions": [*(state.get("researcher_interventions") or []), *(state.get("writer_interventions") or []),
+                           *(state.get("critic_interventions") or []), *(state.get("supervisor_interventions") or [])],
          # Added after E2E01's confirming run delivered a citation the notes did
          # not contain, and the result could not show it directly.
          "unsupported_citations": state.get("unsupported_citations") or [],
@@ -534,7 +577,8 @@ def run(
             log(f"[pace] waited {waited:.0f}s for the per-minute token window")
 
         started = time.monotonic()
-        with get_usage_metadata_callback() as usage:
+        retries = _SdkRetryCounter()
+        with retries, get_usage_metadata_callback() as usage:
             try:
                 observed, checks, review = RUNNERS[s.kind](s, cfg)
                 error = None
@@ -560,6 +604,9 @@ def run(
             "provider": cfg.provider, "model": cfg.model, "status": status,
             "checks": checks, "observed": observed, "expect": s.expect, "error": error,
             "note": s.note, "tokens": tokens, "seconds": round(time.monotonic() - started, 1),
+            # Part D, row A: retries the provider SDK made on its own (per-minute
+            # 429s and any 5xx). Invisible before Part D; counted from its log.
+            "sdk_retries": retries.count,
             "at": datetime.now(timezone.utc).isoformat(),
         }
         _append(cfg.results_path, record)
@@ -567,7 +614,7 @@ def run(
         log(f"[{status}] {s.id} {s.title} ({tokens} tokens, {record['seconds']}s)"
             + (f" - {error}" if error else ""))
 
-        if error and ("429" in error or "rate" in error.lower()):
+        if error and classify_error(error) in ("quota_exhausted", "rate_limited", "model_not_found"):
             detail = describe_rate_limit(error)
             log("[stop] rate limited even after the SDK's retries; stopping so the "
                 "remaining scenarios are not burned against a closed window."

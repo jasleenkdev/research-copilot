@@ -92,7 +92,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
-from research_copilot.request_budget import TrimRecord
+from research_copilot.request_budget import Intervention
 from research_copilot.state import Mode
 
 # 6.2. How the Researcher's *latest pass* went, as a value code can branch on.
@@ -380,10 +380,12 @@ class MultiAgentState(TypedDict, total=False):
 
     # 6.2: how the latest research pass went. See ResearchOutcome above.
     research_outcome: ResearchOutcome | Literal[""]
-    # Phase 7: every time a Researcher request was cut to fit the per-request
-    # size limit this turn (request_budget.py). One field per agent, owned by
-    # that agent - the same visibility rule as the Supervisor's overrides.
-    researcher_trims: list[TrimRecord]
+    # Phase 7: every intervention on a Researcher attempt this turn - trims to
+    # fit the request size limit, hinted and too-large retries, a fallback
+    # model (Part D) - each tagged with its `kind` (request_budget.Intervention).
+    # One field per agent, owned by that agent: the same visibility rule as
+    # the Supervisor's overrides. (Was `researcher_trims` until Part D.)
+    researcher_interventions: list[Intervention]
 
     # --- the Writer's output (owner: writer) ------------------------------------
     # The answer as written, before it is committed to `messages`. Same reason
@@ -395,8 +397,8 @@ class MultiAgentState(TypedDict, total=False):
     # after the Writer's one corrective retry. Empty is the normal case. See
     # `unsupported_citations` in agents/writer.py.
     unsupported_citations: list[str]
-    # Phase 7: request-size trims the Writer made this turn.
-    writer_trims: list[TrimRecord]
+    # Phase 7: interventions on the Writer's attempts this turn (see above).
+    writer_interventions: list[Intervention]
 
     # --- the Supervisor's decisions (owner: supervisor) -------------------------
     # CONCEPT (6.2): the Supervisor owns the *routing* fields, and no content.
@@ -462,6 +464,11 @@ class MultiAgentState(TypedDict, total=False):
     # `[]` really does reset it. Single ownership is what makes that safe: with
     # two writers, read-then-overwrite would lose entries.
     supervisor_log: list[SupervisorLogEntry]
+    # Part D: interventions on the Supervisor's own model call (a fallback
+    # model after a spent quota). Separate from `supervisor_log`, which
+    # records routing decisions; this records what happened to the call that
+    # produced one.
+    supervisor_interventions: list[Intervention]
 
     # --- the Critic's output (owner: critic) -----------------------------------
     # Phase 5's `critique` field, now with one author, the Critic agent. The
@@ -474,8 +481,8 @@ class MultiAgentState(TypedDict, total=False):
     # `research_outcome`. The Supervisor reads "2401.00001: not_found" as a
     # fact, instead of inferring it from the critique's prose.
     citation_checks: list[CitationCheck]
-    # Phase 7: request-size trims the Critic made this turn.
-    critic_trims: list[TrimRecord]
+    # Phase 7: interventions on the Critic's attempts this turn (see above).
+    critic_interventions: list[Intervention]
 
     # --- the human reviewer's output (owner: review_draft) ---------------------
     # Phase 4's `human_feedback`, plus the two things a human verdict carries
@@ -546,7 +553,7 @@ class ResearcherInput(TypedDict, total=False):
     # --- 6.3 / Part B --- its own budget, to know what is left this round
     researcher_budget: AgentBudget
     # --- Phase 7 --- its own earlier trims this turn, to append to
-    researcher_trims: list[TrimRecord]
+    researcher_interventions: list[Intervention]
 
 
 class ResearcherOutput(TypedDict, total=False):
@@ -564,7 +571,7 @@ class ResearcherOutput(TypedDict, total=False):
     research_iterations: int
     research_outcome: ResearchOutcome | Literal[""]
     researcher_budget: AgentBudget
-    researcher_trims: list[TrimRecord]
+    researcher_interventions: list[Intervention]
 
 
 class CriticInput(TypedDict, total=False):
@@ -587,7 +594,7 @@ class CriticInput(TypedDict, total=False):
     draft: str
     research_notes: str
     critic_budget: AgentBudget
-    critic_trims: list[TrimRecord]
+    critic_interventions: list[Intervention]
     # Part B: what the Writer's own check found in this draft - citations that
     # are not in the research notes. The coordination gap E2E01 exposed: the
     # Writer flagged one, the Critic approved without ever being told.
@@ -601,7 +608,7 @@ class CriticOutput(TypedDict, total=False):
     verdict: Verdict | Literal[""]
     citation_checks: list[CitationCheck]
     critic_budget: AgentBudget
-    critic_trims: list[TrimRecord]
+    critic_interventions: list[Intervention]
 
 
 # --------------------------------------------------------------------------
@@ -626,7 +633,7 @@ OWNERS: dict[str, frozenset[str]] = {
     # Must match ResearcherOutput exactly. tests/test_multi_agent.py checks it.
     "researcher": frozenset(ResearcherOutput.__annotations__),
     # Part B: its own budget field (was: its entry in the shared `budgets`).
-    "writer": frozenset({"draft", "writer_budget", "unsupported_citations", "writer_trims"}),
+    "writer": frozenset({"draft", "writer_budget", "unsupported_citations", "writer_interventions"}),
     # Must match CriticOutput exactly, same check as the Researcher.
     "critic": frozenset(CriticOutput.__annotations__),
     "review_draft": frozenset({"human_verdict", "human_feedback", "human_edit"}),
@@ -636,7 +643,7 @@ OWNERS: dict[str, frozenset[str]] = {
     # 6.2. Routing fields only. The Supervisor can read everything and write
     # nothing that an agent produces.
     "supervisor": frozenset(
-        {"next_agent", "researcher_brief", "dispatches", "supervisor_log"}
+        {"next_agent", "researcher_brief", "dispatches", "supervisor_log", "supervisor_interventions"}
     ),
 }
 

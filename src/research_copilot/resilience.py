@@ -60,27 +60,68 @@ class ModelCallFailure:
     attempts: int
 
 
+# --------------------------------------------------------------------------
+# PHASE 7 PART D: one classifier, built from real failures only
+# --------------------------------------------------------------------------
+# Every rule below was written against a real provider error body, captured in
+# Phase 7's live runs and kept in tests/fixtures/provider_errors.json. Nothing
+# here handles a failure that has not been observed. Unobserved kinds (5xx,
+# timeouts, connection errors) are left to the provider SDK's own retries,
+# unchanged - see the ownership table in the README ("Part D").
+#
+# One trap the real bodies exposed: Groq's 413 ("request too large") carries
+# `code: rate_limit_exceeded`, the same code as both 429s. A classifier keyed on
+# the error code would treat a request that can never succeed as "slow down and
+# retry". So every rule keys on status and message, never on the code alone.
+
+QUOTA_EXHAUSTED = "quota_exhausted"   # 429, a *daily* limit: nothing left until it refills
+RATE_LIMITED = "rate_limited"         # 429, a per-minute limit: the SDK's to retry
+TOO_LARGE = "too_large"               # 413 / "prompt is too long": shrink, do not wait
+INVALID_TOOL = "invalid_tool"         # 400 tool_use_failed: the model's behaviour
+MODEL_NOT_FOUND = "model_not_found"   # 404: configuration, not a runtime condition
+OTHER = "other"
+
+
+def classify(exc: BaseException) -> str:
+    """Which row of the ownership table an exception belongs to."""
+    text = str(exc)
+    status = getattr(exc, "status_code", None)
+    if status == 429 or "Error code: 429" in text:
+        return QUOTA_EXHAUSTED if (" per day (" in text or "(TPD)" in text or "(RPD)" in text) else RATE_LIMITED
+    if status == 413 or "Error code: 413" in text or "Request too large" in text or "prompt is too long" in text:
+        return TOO_LARGE
+    if "tool_use_failed" in text or "not in request.tools" in text:
+        return INVALID_TOOL
+    if "model_not_found" in text:
+        return MODEL_NOT_FOUND
+    return OTHER
+
+
+class QuotaExhausted(RuntimeError):
+    """The provider's daily limit is spent, and no fallback model took over.
+
+    Raised, never degraded around (Part D decision). Once the quota is gone,
+    every later call in the run fails the same way, so "degrade gracefully"
+    would only be a slower, more expensive route to the same total failure.
+    The run-level handler (CLI, live-check, and later the API) turns it into
+    one clean message. The Supervisor must not swallow it into fixed_policy.
+    """
+
+
 def is_invalid_tool_call(exc: Exception) -> bool:
     """The model called a tool it was not given, and the provider refused it.
 
-    Groq reports this as a 400 with code `tool_use_failed`. Recognised by the
-    message rather than by exception class, so that the check does not import
-    every provider's SDK. The Anthropic path does not raise this: an unknown
-    tool name there reaches `_execute_tool_call`, which already answers it
-    with an error ToolMessage (Phase 1).
+    Groq reports this as a 400 with code `tool_use_failed`. The Anthropic path
+    does not raise this: an unknown tool name there reaches `_execute_tool_call`,
+    which already answers it with an error ToolMessage (Phase 1).
     """
-    text = str(exc)
-    return "tool_use_failed" in text or "not in request.tools" in text
+    return classify(exc) == INVALID_TOOL
 
 
 def is_request_too_large(exc: Exception) -> bool:
-    """The provider refused the request for its size (Phase 7).
-
-    Groq: 413 "Request too large". Anthropic: 400 "prompt is too long".
-    Recognised by message, for the same reason as `is_invalid_tool_call`.
-    """
-    text = str(exc)
-    return "Request too large" in text or "Error code: 413" in text or "prompt is too long" in text
+    """The provider refused the request for its size (Phase 7). Groq: 413.
+    Anthropic: 400 "prompt is too long" (documented; not yet observed)."""
+    return classify(exc) == TOO_LARGE
 
 
 def _with_note(request: Sequence[BaseMessage], note: str) -> list[BaseMessage]:
@@ -106,35 +147,92 @@ def invoke_with_recovery(
     note: str,
     where: str,
     on_too_large: Callable[[], Sequence[BaseMessage]] | None = None,
+    fallback: Callable[[], tuple[object, Sequence[BaseMessage]]] | None = None,
+    on_intervention: Callable[[dict], None] | None = None,
 ) -> tuple[AIMessage | ModelCallFailure, int]:
-    """Call `runnable`; on a recoverable failure retry once.
+    """Call `runnable`, and recover from the failures this layer owns.
 
-    Two recoverable kinds, each with its own retry:
-      - `recoverable(exc)` (e.g. an invented tool call): retry with `note` added
-      - the provider refused the request as too large, and the caller gave
-        `on_too_large`: retry with the smaller request it builds (Phase 7,
-        request_budget.py). No note - the problem was size, not behaviour.
+    The call-level row of the ownership table (README, Part D):
 
-    Returns (message or failure, attempts made). Anything else propagates
-    unchanged - a missing API key or a malformed request is a bug to surface,
-    not a condition to paper over.
+      failure            action                                 bound
+      -----------------  -------------------------------------  -------------
+      invented tool      retry once with `note`                 one retry
+      too large          retry once with `on_too_large()`       one retry
+      daily quota        `fallback()` model, else QuotaExhausted  no retry of
+                                                                the same model
+      anything else      propagate (the SDK already retried what
+                         it owns; the rest is a bug to surface)
+
+    `fallback` returns (runnable, request) for the fallback model: its own
+    binding (tools / structured output) and a request sized to its own limit,
+    because both are resolved per model (Part B's note). `on_intervention`
+    receives one record per recovery, so the calling agent can log it in state.
+
+    Returns (message or failure, attempts made).
     """
+    record = on_intervention or (lambda _: None)
+
+    def quota(exc: BaseException, attempts: int):
+        resolved = fallback() if fallback is not None else None
+        if resolved is None:
+            raise QuotaExhausted(f"{where}: {exc}") from exc
+        log.warning("%s: daily quota exhausted (%s); switching to the fallback model", where, exc)
+        fb_runnable, fb_request = resolved
+        record({"kind": "fallback_model", "detail": f"primary model's daily quota exhausted: {str(exc)[:160]}"})
+        result, more = invoke_with_recovery(
+            fb_runnable, fb_request, recoverable=recoverable, note=note,
+            where=f"{where} (fallback)", on_intervention=record,
+        )
+        return result, attempts + more
+
     try:
         return runnable.invoke(list(request)), 1
-    except Exception as exc:  # noqa: BLE001 - filtered below
+    except Exception as exc:  # noqa: BLE001 - dispatched on classify() below
+        kind = classify(exc)
+        if kind == QUOTA_EXHAUSTED:
+            return quota(exc, 1)
         first = exc
-        if on_too_large is not None and is_request_too_large(exc):
+        if on_too_large is not None and kind == TOO_LARGE:
             log.warning("%s: request refused as too large (%s); retrying once, smaller", where, exc)
             retry_request = list(on_too_large())
+            record({"kind": "too_large_retry", "detail": str(exc)[:160]})
         elif recoverable(exc):
             log.warning("%s: model call failed (%s); retrying once with a hint", where, exc)
             retry_request = _with_note(request, note)
+            record({"kind": "hint_retry", "detail": str(exc)[:160]})
         else:
             raise
     try:
         return runnable.invoke(retry_request), 2
     except Exception as exc:  # noqa: BLE001
-        if not (recoverable(exc) or is_request_too_large(exc)):
+        kind = classify(exc)
+        if kind == QUOTA_EXHAUSTED:
+            return quota(exc, 2)
+        if not (recoverable(exc) or kind == TOO_LARGE):
             raise
         log.warning("%s: retry failed too (%s); handing back a failure", where, exc)
+        record({"kind": "gave_up", "detail": f"retry failed too: {str(exc)[:160]}"})
         return ModelCallFailure(error=f"{type(first).__name__}: {first} | retry: {exc}", attempts=2), 2
+
+
+def model_fallback(bind, build, *, override=None):
+    """Build the `fallback=` argument for `invoke_with_recovery`, per call site.
+
+    `bind(model)` applies what this call needs - tools, structured output - to
+    the fallback model. `build(limit)` sizes the request to *that model's*
+    request limit. Both are re-resolved for the fallback because both depend on
+    the model (Part B's note: structured-output method, strict mode and size
+    limit are per provider). Returns None when no fallback is configured, which
+    `invoke_with_recovery` turns into QuotaExhausted.
+    """
+
+    def make():
+        from research_copilot.models import get_fallback_model, provider_of
+        from research_copilot.request_budget import max_request_tokens
+
+        model = override or get_fallback_model()
+        if model is None:
+            return None
+        return bind(model), build(max_request_tokens(provider_of(model)))
+
+    return make

@@ -1,0 +1,89 @@
+{
+  "_about": "Real provider error bodies from Phase 7 live runs (Groq, openai/gpt-oss-120b unless noted). Org id redacted. `headers_captured: false` means the response headers were not recorded; any header shown is derived from the message text. Part D's rules are built from these and nothing else.",
+  "groq_429_tokens_per_day": {
+    "status": 429,
+    "body": {
+      "error": {
+        "message": "Rate limit reached for model `openai/gpt-oss-120b` in organization `org_REDACTED` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199939, Requested 6726. Please try again in 47m59.28s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing",
+        "type": "tokens",
+        "code": "rate_limit_exceeded"
+      }
+    },
+    "source": "results-groq-v5.jsonl, E2E01 (A1 close-out)",
+    "headers": {
+      "retry-after": "2879"
+    },
+    "headers_captured": false
+  },
+  "groq_429_tokens_per_minute": {
+    "status": 429,
+    "headers": {
+      "retry-after": "13",
+      "x-ratelimit-limit-requests": "1000",
+      "x-ratelimit-limit-tokens": "8000",
+      "x-ratelimit-remaining-requests": "999",
+      "x-ratelimit-remaining-tokens": "3207",
+      "x-ratelimit-reset-requests": "1m26.4s",
+      "x-ratelimit-reset-tokens": "35.947s"
+    },
+    "body": {
+      "error": {
+        "message": "Rate limit reached for model `openai/gpt-oss-120b` in organization `org_REDACTED` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 4793, Requested 4881. Please try again in 12.555s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing",
+        "type": "tokens",
+        "code": "rate_limit_exceeded"
+      }
+    },
+    "headers_captured": true,
+    "source": "captured deliberately for Part D: two ~5k-token requests back to back"
+  },
+  "groq_413_request_too_large": {
+    "status": 413,
+    "body": {
+      "error": {
+        "message": "Request too large for model `openai/gpt-oss-120b` in organization `org_REDACTED` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 8849, please reduce your message size and try again. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing",
+        "type": "tokens",
+        "code": "rate_limit_exceeded"
+      }
+    },
+    "source": "results-groq-v5.jsonl, E2E01 third attempt",
+    "headers_captured": false
+  },
+  "groq_400_invented_tool": {
+    "status": 400,
+    "body": {
+      "error": {
+        "message": "Tool call validation failed: tool call validation failed: attempted to call tool 'open_file' which was not in request.tools",
+        "type": "invalid_request_error",
+        "code": "tool_use_failed",
+        "failed_generation": "{\"name\": \"open_file\", \"arguments\": {\"cursor\": 0, \"id\": 1}}"
+      }
+    },
+    "source": "results-groq.jsonl, RES01 (A1 day one)",
+    "headers_captured": false
+  },
+  "groq_400_tool_choice_none_ignored": {
+    "status": 400,
+    "headers_captured": false,
+    "source": "v3 run log (Researcher final call, A1 day two); recovered, so not in results",
+    "body": {
+      "error": {
+        "message": "Tool choice is none, but model called a tool",
+        "type": "invalid_request_error",
+        "code": "tool_use_failed",
+        "failed_generation": "{\"name\": \"search_arxiv\", \"arguments\": {\"max_results\": 5, \"query\": \"Ragas framework measures retrieval relevance answer relevance faithfulness\"}}"
+      }
+    }
+  },
+  "groq_404_model_not_found": {
+    "status": 404,
+    "body": {
+      "error": {
+        "message": "The model `llama-3.3-70b-versatile` does not exist or you do not have access to it.",
+        "type": "invalid_request_error",
+        "code": "model_not_found"
+      }
+    },
+    "source": "results-groq.jsonl, S00g with llama-3.3-70b-versatile (free tier)",
+    "headers_captured": false
+  }
+}

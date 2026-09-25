@@ -114,7 +114,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from research_copilot.request_budget import RETRY_FACTOR, estimate, fit_text, max_request_tokens, trim_record
-from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
+from research_copilot.resilience import (
+    ModelCallFailure,
+    invoke_with_recovery,
+    is_invalid_tool_call,
+    model_fallback,
+)
 # Phase 5's parsers, imported rather than copied: one definition of what a
 # verdict is, shared by the Phase 5 critic, the Phase 4 human gate, and this
 # agent.
@@ -205,6 +210,7 @@ def build_critic(
     model: BaseChatModel | None = None,
     tools: Sequence[BaseTool] | None = None,
     max_iterations: int = DEFAULT_MAX_CRITIC_ITERATIONS,
+    fallback_model: BaseChatModel | None = None,
 ) -> Runnable:
     """Compile the Critic subgraph.
 
@@ -286,11 +292,13 @@ def build_critic(
             critic_model_runnable(), build(limit),
             recoverable=is_invalid_tool_call, note=INVALID_TOOL_NOTE, where="critic",
             on_too_large=lambda: build(int(limit * RETRY_FACTOR)),
+            fallback=model_fallback(lambda m: m, build, override=fallback_model),
+            on_intervention=lambda i: trims.append({"node": "critic", **i}),
         )
         iterations = state.get("critic_iterations", 0) + attempts
         update: dict = {"critic_iterations": iterations}
         if trims:
-            update["critic_trims"] = [*(state.get("critic_trims") or []), *trims]
+            update["critic_interventions"] = [*(state.get("critic_interventions") or []), *trims]
         if isinstance(result, ModelCallFailure):
             marker = AIMessage(content="", additional_kwargs={"model_error": result.error})
             return {**update, "critic_messages": [marker]}

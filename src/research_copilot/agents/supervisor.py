@@ -185,6 +185,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from research_copilot.models import get_chat_model, structured_output_kwargs
+from research_copilot.resilience import QuotaExhausted, invoke_with_recovery, model_fallback
+from research_copilot.request_budget import describe_intervention
 from research_copilot.multi_agent_state import (
     AGENTS,
     MultiAgentState,
@@ -468,15 +470,17 @@ def render_supervisor_view(
         f"Latest research pass: {outcome}",
         f"Draft {draft_note}:\n{_excerpt(draft)}",
     ]
-    trims = [*(state.get("researcher_trims") or []), *(state.get("writer_trims") or []),
-             *(state.get("critic_trims") or [])]
-    if trims:
-        # Phase 7: context that was cut to fit the per-request size limit.
-        # A fact about what each agent actually saw - e.g. a Critic that judged
-        # against trimmed notes - shown like every other intervention.
+    interventions = [*(state.get("researcher_interventions") or []),
+                     *(state.get("writer_interventions") or []),
+                     *(state.get("critic_interventions") or []),
+                     *(state.get("supervisor_interventions") or [])]
+    if interventions:
+        # Phase 7: trims, retries and fallbacks on the agents' attempts - facts
+        # about what each agent saw and which model answered, shown like every
+        # other intervention. (describe_intervention handles every kind.)
         sections.append(
-            "Requests trimmed to fit the size limit this turn: "
-            + "; ".join(f"{t['node']} {t['part']} {t['tokens_before']}->{t['tokens_after']} tokens" for t in trims)
+            "Interventions on agents' attempts this turn: "
+            + "; ".join(describe_intervention(i) for i in interventions)
         )
     if state.get("unsupported_citations"):
         # Phase 7: shown as a fact, like citation_checks. What to do about it is
@@ -658,6 +662,7 @@ def make_supervisor(
     enable_critic: bool = False,
     max_revisions: int = 0,
     routing: Literal["supervisor", "fixed"] = "supervisor",
+    fallback_model: BaseChatModel | None = None,
 ):
     """Build the Supervisor node.
 
@@ -684,6 +689,7 @@ def make_supervisor(
         return _cache["runnable"]
 
     def supervisor(state: MultiAgentState) -> dict:
+        recovered: list = []
         log = list(state.get("supervisor_log") or [])
         step = len(log) + 1
         brief = ""
@@ -695,21 +701,38 @@ def make_supervisor(
             route, override = apply_guards(proposed, state, caps, **guard_kwargs)
         else:
             raw = None
+            # Part D: the view is built OUTSIDE the error handling below. That
+            # handler exists for an unusable *model* reply; wrapped around our
+            # own code it turned a formatting bug into a silent fixed_policy
+            # route that looked exactly like a model failure (found in Part D).
+            request = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(
+                    content=render_supervisor_view(state, caps, max_revisions=max_revisions, **guard_kwargs)
+                ),
+            ]
             try:
-                raw = structured().invoke(
-                    [
-                        SystemMessage(content=system_prompt),
-                        HumanMessage(
-                            content=render_supervisor_view(
-                                state, caps, max_revisions=max_revisions, **guard_kwargs
-                            )
-                        ),
-                    ]
+                raw, _attempts = invoke_with_recovery(
+                    structured(), request,
+                    recoverable=lambda exc: False, note="", where="supervisor",
+                    # A spent daily quota: the fallback model, with ITS
+                    # structured-output method (resolved per model).
+                    fallback=model_fallback(
+                        lambda m: m.with_structured_output(SupervisorDecision, **structured_output_kwargs(m)),
+                        lambda limit_: request,  # the view is bounded by VIEW_CHARS
+                        override=fallback_model,
+                    ),
+                    on_intervention=lambda i: recovered.append({"node": "supervisor", **i}),
                 )
                 decision = (
                     raw if isinstance(raw, SupervisorDecision) else SupervisorDecision.model_validate(raw)
                 )
-            except Exception as exc:  # noqa: BLE001 - any failure takes the same path
+            except QuotaExhausted:
+                # Never a routing decision: the run stops (Part D). Swallowing it
+                # here would route on fixed_policy into agents whose calls all
+                # fail the same way.
+                raise
+            except Exception as exc:  # noqa: BLE001 - an unusable reply takes the fixed_policy path
                 # 6.3: keep what the model tried to say, when it can be
                 # recovered. 6.2 logged None here, which hid a proposal like
                 # "critic" behind a generic validation error.
@@ -735,6 +758,8 @@ def make_supervisor(
             "revision": state.get("revisions", 0),
         }
         update: dict = {"next_agent": route, "supervisor_log": [*log, entry]}
+        if recovered:
+            update["supervisor_interventions"] = [*(state.get("supervisor_interventions") or []), *recovered]
         if route in AGENTS:
             dispatches = dict(state.get("dispatches") or {})
             dispatches[route] = dispatches.get(route, 0) + 1

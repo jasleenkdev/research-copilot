@@ -98,6 +98,8 @@ from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from research_copilot.agent_loop import run_tool_loop
+from research_copilot.models import ModelNotAvailable, check_model_available
+from research_copilot.resilience import QuotaExhausted
 from research_copilot.chains import build_answer_chain, build_structured_chain
 from research_copilot.config import get_settings
 from research_copilot.ingest import DEFAULT_CHUNK_OVERLAP, DEFAULT_CHUNK_SIZE, ingest_path
@@ -1020,6 +1022,10 @@ def cmd_multi_agent(
         max_history_tokens=max_history_tokens,
     )
 
+    # Part D, row F: fail fast if the configured model does not exist for this
+    # key - before any node runs (Part A's first live call hit a 404 mid-run).
+    check_model_available()
+
     with checkpointer_scope(checkpointer) as saver:
         if approve and saver is None:
             print(
@@ -1239,15 +1245,13 @@ def _print_multi_agent_state(state: dict) -> None:
         )
     if state.get("revisions"):
         print(f"  start_revision -> revisions: {state['revisions']}", file=sys.stderr)
-    trims = [*(state.get("researcher_trims") or []), *(state.get("writer_trims") or []),
-             *(state.get("critic_trims") or [])]
-    for t in trims:
-        # Phase 7: request-size trims are interventions, printed like overrides.
-        print(
-            f"  [trimmed]      {t['node']}: {t['part']} {t['tokens_before']} -> {t['tokens_after']} "
-            f"tokens (limit {t['limit']})",
-            file=sys.stderr,
-        )
+    from research_copilot.request_budget import describe_intervention
+
+    interventions = [*(state.get("researcher_interventions") or []), *(state.get("writer_interventions") or []),
+                     *(state.get("critic_interventions") or []), *(state.get("supervisor_interventions") or [])]
+    for i in interventions:
+        # Phase 7: trims, retries and fallbacks, printed like overrides.
+        print(f"  [intervention] {describe_intervention(i)}", file=sys.stderr)
     # Part B: one field per agent; the legacy dict only on old threads.
     budgets = {
         agent: state[f"{agent}_budget"] for agent in ("researcher", "writer", "critic")
@@ -1364,6 +1368,7 @@ def cmd_live_check(
     from research_copilot.config import require_anthropic_key, require_groq_key
 
     (require_groq_key if provider == "groq" else require_anthropic_key)()
+    check_model_available()  # Part D, row F
     print(f"[live-check] provider={provider} model={model} results={path}", file=sys.stderr)
     if provider == "groq" and not limits_path.exists():
         try:
@@ -1379,6 +1384,12 @@ def cmd_live_check(
     )
     runner.run(cfg, selected, log=lambda m: print(m, file=sys.stderr))
     print(f"\nNext: research-copilot live-check report", file=sys.stderr)
+
+
+def _quota_detail(exc: BaseException) -> str:
+    from research_copilot.live_check.runner import describe_rate_limit
+
+    return describe_rate_limit(str(exc)) or str(exc)[:200]
 
 
 def _report_tracing() -> None:
@@ -1895,6 +1906,20 @@ def main(argv: list[str] | None = None) -> int:
                 text=args.edit or "",
                 note=args.note,
             )
+    except QuotaExhausted as exc:
+        # Part D, run level: the provider's daily quota is spent and no fallback
+        # model took over. One clean line, not a traceback - and not a
+        # degraded answer built from a string of failing calls.
+        print(
+            "error: the model provider's daily quota is exhausted, and no fallback model is "
+            "configured (RESEARCH_COPILOT_FALLBACK_MODEL). The run was stopped rather than "
+            f"degraded.\n  {_quota_detail(exc)}",
+            file=sys.stderr,
+        )
+        return 1
+    except ModelNotAvailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except FileNotFoundError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

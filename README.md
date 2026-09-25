@@ -1379,6 +1379,21 @@ prompts:
 | a provider counts `max_tokens` against its limits | my headroom probe | Groq: the probe passed with ~1k free |
 | a request cannot outgrow the provider's ceiling | every agent, since Phase 6 | a 413 at 8,849 tokens |
 
+### Error handling that hides our own bugs
+
+Part D found a quieter relative of the guard problem. The Supervisor's
+`except Exception` existed for one purpose: an unusable *model* reply falls
+back to `fixed_policy`. But it also wrapped the Supervisor's own view-building
+code. When Part D changed a data shape, the view raised `KeyError`, the
+handler caught it, and the run silently routed on `fixed_policy`. The log
+recorded "fallback to fixed policy", indistinguishable from a model failure.
+The same pattern turned a crash inside the new HTTP transport into what the
+SDK treated as a connection error, which it retried.
+
+**A fallback handler should wrap only the thing it is a fallback for.** Our
+own code outside it must fail loudly, because a bug handled as a model
+failure is a bug nobody will look for.
+
 ### A different failure: the coordination gap
 
 The table above is about single components holding a wrong belief. E2E01's
@@ -1536,3 +1551,63 @@ day it doesn't.
 the Writer's `unsupported_citations` as a fact, with a rule to reject on
 them. Evidence: see the table in "A different failure: the coordination
 gap" above.
+
+
+### Part D: who handles which failure
+
+**Before writing any retry code, each failure type was given exactly one
+owner.** Every rule is built from a real provider response captured in Part A
+or deliberately in Part D (`tests/fixtures/provider_errors.json`, org id
+redacted). Nothing handles a failure that has not been observed.
+
+| Row | Failure (real body) | Owner | Action | Before Part D |
+| --- | --- | --- | --- | --- |
+| A | 429 per minute, retry-after ~13 s | **provider SDK** | its own 2 retries, honouring retry-after; now *counted* in live runs | 6 retries, uncounted |
+| B | 429 **daily** limit, retry-after in minutes or hours | **call level** | fallback model if configured, else `QuotaExhausted`, which stops the run | the SDK sent **7 requests in 21 s**, every one bound to fail, then crashed |
+| C | 413 request too large | call level | the request-size limit prevents it; one retry at 70% | same (Part A) |
+| D | 400 invented tool | call level | one retry with a hint | same (Part A) |
+| E | 400 `tool_choice` ignored | call level | one retry; the design no longer uses `tool_choice` | same (Part A) |
+| F | 404 model not found | **run level** | a startup preflight fails fast and lists the available models | crashed mid-run |
+| G | 5xx, timeouts, connection errors | provider SDK | default, **untested**: never observed | same |
+| H | Anthropic refusal | Anthropic's API | server-side fallback, **untested** | same |
+| I-L | unusable Supervisor output; unreadable or unfinished Critic verdict; unsupported citations | graph and output levels | unchanged (Phase 6, Part A) | - |
+
+How rows A and B are kept apart, precisely:
+- The Groq SDK retries every 429, and honours retry-after only up to 60 seconds.
+- A small HTTP transport (`models.QuotaAwareTransport`, sync and async) adds
+  `x-should-retry: false` to **daily-limit** responses only, a header the SDK
+  already respects. The SDK keeps row A and stops touching row B.
+- Measured with the real SDK and real bodies: a daily limit now costs **1**
+  request, not 7. A per-minute limit still gets the SDK's 2 retries.
+
+The traps the real bodies exposed:
+- Groq's 413 carries `code: rate_limit_exceeded`, the **same code as both
+  429s**. So classification keys on status and message, never on the code.
+- At the transport level, httpx has not yet attached the request to the
+  response. The first version of the transport crashed reading it, and the
+  SDK retried *that* as a connection error, silently recreating the waste it
+  was built to stop.
+
+**Fallback models** (`RESEARCH_COPILOT_FALLBACK_MODEL=provider:model`,
+e.g. `groq:openai/gpt-oss-20b`, which has its own daily limit):
+- Triggered only by a spent daily quota, the one trigger observed.
+- For every agent: Supervisor, Researcher, Writer and Critic.
+- The fallback re-resolves its own structured-output method, tool binding
+  and request-size limit. `resilience.model_fallback` builds that per call
+  site.
+- With no fallback configured, a spent quota stops the run with one clean
+  message. It is not degraded around, because every later call would fail
+  the same way.
+
+**Interventions: one field per agent.** `researcher_interventions`,
+`writer_interventions`, `critic_interventions` and
+`supervisor_interventions` hold every trim, hinted retry, too-large retry,
+fallback and give-up, each tagged with a `kind`. They replace Part A's
+`<agent>_trims` fields, merged while no real thread depended on those names.
+One formatter, `describe_intervention`, serves the Supervisor, the CLI and
+the report.
+
+**Deliberately not added:**
+- LangGraph's node-level `RetryPolicy`. Around a subgraph it would re-run
+  the whole Researcher loop on top of the SDK's retries.
+- Any handling for the unobserved rows G and H.

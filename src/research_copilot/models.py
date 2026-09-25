@@ -69,11 +69,89 @@ _GROQ_JSON_SCHEMA_MODELS = frozenset(
 )
 
 
+# --------------------------------------------------------------------------
+# PHASE 7 PART D: keeping the SDK layer out of the call level's failures
+# --------------------------------------------------------------------------
+# The Groq SDK retries every 429. It honours retry-after only up to 60 s, and
+# past that it backs off 0.5 -> 8 s. A daily-limit 429 says "try again in 48
+# minutes", so the SDK's retries against it are guaranteed to fail and each one
+# spends a request of the 1,000-per-day limit. The ownership table gives that
+# failure to the call level, which falls back or stops the run. So the SDK
+# must not touch it.
+#
+# The SDK honours a server header, `x-should-retry: false`. This transport adds
+# it to daily-limit 429 responses before the SDK sees them. The SDK still
+# retries per-minute 429s (row A) exactly as before. It is the narrowest way to
+# move one failure out of the SDK's hands without taking the others with it.
+
+
+def _is_daily_limit(response) -> bool:
+    if response.status_code != 429:
+        return False
+    try:
+        return " per day (" in response.read().decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 - an unreadable body is not a daily limit
+        return False
+
+
+def _no_retry(response, request):
+    """A copy of `response` carrying `x-should-retry: false`.
+
+    `request` is passed in, not read from `response.request`: at the transport
+    level httpx has not attached it yet. Reading it raises - and the SDK
+    treats *that* as a connection error and retries it, which is the waste
+    this transport exists to stop. Found by the fixture test, not by review.
+    """
+    import httpx
+
+    headers = httpx.Headers(response.headers)
+    headers["x-should-retry"] = "false"
+    return httpx.Response(response.status_code, headers=headers, content=response.content,
+                          request=request, extensions=response.extensions)
+
+
+class QuotaAwareTransport:
+    """httpx transport: mark daily-limit 429s as not-to-be-retried by the SDK."""
+
+    def __init__(self, inner=None):
+        import httpx
+
+        self._inner = inner or httpx.HTTPTransport()
+
+    def handle_request(self, request):
+        response = self._inner.handle_request(request)
+        return _no_retry(response, request) if _is_daily_limit(response) else response
+
+    def close(self):
+        self._inner.close()
+
+
+class AsyncQuotaAwareTransport:
+    """The async twin, for `ainvoke` / `astream_events` (Part C)."""
+
+    def __init__(self, inner=None):
+        import httpx
+
+        self._inner = inner or httpx.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request):
+        response = await self._inner.handle_async_request(request)
+        if response.status_code == 429:
+            await response.aread()
+            if _is_daily_limit(response):
+                return _no_retry(response, request)
+        return response
+
+    async def aclose(self):
+        await self._inner.aclose()
+
+
 def get_chat_model(
     *,
     max_tokens: int | None = None,
     server_side_fallback: bool = True,
     provider: str | None = None,
+    model_name: str | None = None,
 ) -> BaseChatModel:
     """Build the chat model every chain and agent uses.
 
@@ -93,15 +171,22 @@ def get_chat_model(
         require_groq_key()
         # Imported here so the Anthropic path never needs langchain-groq
         # installed (it is an optional dependency: pip install -e ".[groq]").
+        import httpx
         from langchain_groq import ChatGroq
 
         return ChatGroq(
-            model=settings.groq_model,
+            model=model_name or settings.groq_model,
             max_tokens=max_tokens or _GROQ_DEFAULT_MAX_TOKENS,
-            # The free tier limits tokens per minute. A multi-agent run can
-            # cross that inside one turn, so a 429 is expected, not exceptional.
-            # The Groq SDK retries 429s itself, honouring retry-after.
-            max_retries=6,
+            # Part D: the SDK owns per-minute 429s (row A of the ownership
+            # table) and honours their retry-after, which is under 60 s. Its
+            # default of 2 retries is enough. The 6 used during Part A were
+            # never a deliberate choice, and on a *daily*-limit 429 every one
+            # of them was guaranteed to fail (7 requests, 21 s, in the test).
+            max_retries=2,
+            # ...and the transport stops the SDK retrying daily-limit 429s at
+            # all: those belong to the call level (resilience.py).
+            http_client=httpx.Client(transport=QuotaAwareTransport()),
+            http_async_client=httpx.AsyncClient(transport=AsyncQuotaAwareTransport()),
             # No temperature, for parity with the Anthropic path - the
             # comparison should differ by provider, not by sampling settings.
         )
@@ -117,7 +202,7 @@ def get_chat_model(
         }
 
     return ChatAnthropic(
-        model=settings.model,
+        model=model_name or settings.model,
         max_tokens=max_tokens or 16000,
         # No `temperature`: current Claude models reject sampling parameters.
         # They use adaptive thinking by default, deciding how much to reason
@@ -188,3 +273,74 @@ def structured_output_method(model) -> str:
         return "json_schema" if model.model_name in _GROQ_JSON_SCHEMA_MODELS else "function_calling"
     return "json_schema"
 
+
+def get_fallback_model(*, max_tokens: int | None = None) -> BaseChatModel | None:
+    """The model to switch to when the primary's daily quota is gone (Part D).
+
+    Configured with RESEARCH_COPILOT_FALLBACK_MODEL as "provider:model", e.g.
+    "groq:openai/gpt-oss-20b" (a separate daily bucket on Groq's free tier) or
+    "anthropic:claude-sonnet-5". Unset means no fallback: a spent quota stops
+    the run cleanly (QuotaExhausted).
+
+    Only a spent daily quota triggers it - the one trigger observed. Outages
+    (5xx, timeouts) are not observed, so they stay with the SDK's retries.
+    """
+    import os
+
+    spec = (os.getenv("RESEARCH_COPILOT_FALLBACK_MODEL") or "").strip()
+    if not spec:
+        return None
+    provider, _, name = spec.partition(":")
+    if not name:
+        raise RuntimeError(
+            f"RESEARCH_COPILOT_FALLBACK_MODEL={spec!r}: expected 'provider:model', "
+            "e.g. 'groq:openai/gpt-oss-20b'."
+        )
+    return get_chat_model(provider=provider, model_name=name, max_tokens=max_tokens)
+
+
+def provider_of(model) -> str:
+    """Which provider a model object belongs to - for per-model limits."""
+    try:
+        from langchain_groq import ChatGroq
+    except ImportError:  # pragma: no cover
+        ChatGroq = None
+    if ChatGroq is not None and isinstance(model, ChatGroq):
+        return "groq"
+    if isinstance(model, ChatAnthropic):
+        return "anthropic"
+    return get_settings().provider
+
+
+class ModelNotAvailable(RuntimeError):
+    """The configured model does not exist for this key (row F: fail fast)."""
+
+
+def check_model_available(provider: str | None = None, model_name: str | None = None) -> None:
+    """Fail fast, before a run starts, if the configured model is not available.
+
+    Part A's first live call hit `404 model_not_found` (Llama 3.3 70B is not on
+    Groq's free tier) mid-run. This asks the provider's model list up front:
+    one free call, no tokens. Never retried, and never papered over by a
+    fallback - a wrong model name is a configuration error to fix.
+    """
+    settings = get_settings()
+    provider = (provider or settings.provider).lower()
+    if provider == "groq":
+        require_groq_key()
+        import groq
+
+        name = model_name or settings.groq_model
+        available = {m.id for m in groq.Groq(max_retries=1).models.list().data}
+    else:
+        require_anthropic_key()
+        import anthropic
+
+        # Documented API (Models API); not exercised live - no Anthropic key yet.
+        name = model_name or settings.model
+        available = {m.id for m in anthropic.Anthropic(max_retries=1).models.list()}
+    if name not in available:
+        raise ModelNotAvailable(
+            f"model {name!r} is not available to this {provider} key. "
+            f"Available: {', '.join(sorted(available)) or '(none)'}"
+        )

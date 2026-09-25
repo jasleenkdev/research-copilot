@@ -69,7 +69,7 @@ import re
 from research_copilot.models import get_chat_model
 from research_copilot.multi_agent_state import MultiAgentState, budget_of
 from research_copilot.request_budget import RETRY_FACTOR, estimate, fit_text, max_request_tokens, trim_record
-from research_copilot.resilience import ModelCallFailure, invoke_with_recovery
+from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, model_fallback
 from research_copilot.tools.citations import extract_citations
 # Phase 5's revision instruction, reused verbatim: the Writer is the node that
 # inherits call_model's revising half, so it inherits the prompt too.
@@ -195,6 +195,7 @@ def make_writer(
     model: BaseChatModel | None = None,
     max_calls: int = DEFAULT_MAX_WRITER_CALLS,
     max_revisions: int = 0,
+    fallback_model: BaseChatModel | None = None,
 ):
     """Build the Writer node.
 
@@ -277,6 +278,9 @@ def make_writer(
                 writer_model(), request,
                 recoverable=lambda exc: False, note="", where="writer",
                 on_too_large=lambda: build(int(limit * RETRY_FACTOR), extra),
+                fallback=model_fallback(lambda m: m, lambda limit_: build(limit_, extra),
+                                        override=fallback_model),
+                on_intervention=lambda i: trims.append({"node": "writer", **i}),
             )
             # A Writer whose request cannot be served produces no draft; the
             # Supervisor sees there is nothing to finish. It does not crash.
@@ -305,7 +309,7 @@ def make_writer(
             "writer_budget": {"used": used, "cap": max_calls},
         }
         if trims:
-            update["writer_trims"] = [*(state.get("writer_trims") or []), *trims]
+            update["writer_interventions"] = [*(state.get("writer_interventions") or []), *trims]
         return update
 
     return write_draft

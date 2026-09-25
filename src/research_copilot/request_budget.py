@@ -24,9 +24,10 @@ the agent knows which of its inputs that is.
 
 CONCEPT: a trim is an intervention, and interventions are logged
 Truncated context changes what the model sees as surely as an overridden route
-changes where the run goes. So every trim returns a `TrimRecord`, and each agent
-writes its trims to a field it owns (`researcher_trims`, `writer_trims`,
-`critic_trims`). The Supervisor is shown them as facts, and the final state
+changes where the run goes. So every trim returns an `Intervention` (kind "trim"), and each agent
+writes it to the interventions field it owns (`researcher_interventions`,
+`writer_interventions`, `critic_interventions`) - the same field its retries
+and fallbacks go to (Part D). The Supervisor is shown them as facts, and the final state
 lists them - the same visibility as the Supervisor's overrides, the Critic's
 fail-closed parsing, and `fixed_policy`.
 
@@ -59,14 +60,31 @@ RETRY_FACTOR = 0.7
 TRIM_MARKER = "\n[... {cut} characters cut to fit the request size limit ...]"
 
 
-class TrimRecord(TypedDict):
-    """One trim: which agent, which part of its request, by how much."""
+class Intervention(TypedDict, total=False):
+    """One intervention on an agent's attempt (Phase 7 Part D).
+
+    One record type for everything that changed what an agent saw or which
+    model answered it, so the Supervisor, the CLI and the harness read one
+    field per agent, not several. `kind` says which:
+
+      trim             part of the request was cut to fit the size limit
+                       (`part`, `tokens_before`, `tokens_after`, `limit`)
+      hint_retry       retried once with a hint (e.g. after an invented tool)
+      too_large_retry  the provider refused the size; retried once, smaller
+      fallback_model   the primary's daily quota was spent; the fallback answered
+      gave_up          the retry failed too; the agent degraded
+
+    Until Part D these were `TrimRecord`s in `<agent>_trims` fields, introduced
+    in Part A and merged here while no real thread depended on the old names.
+    """
 
     node: str
+    kind: str
     part: str
     tokens_before: int
     tokens_after: int
     limit: int
+    detail: str
 
 
 def max_request_tokens(provider: str | None = None) -> int:
@@ -108,5 +126,24 @@ def fit_text(text: str, available_tokens: int) -> tuple[str, int, int]:
     return cut, before, text_tokens(cut)
 
 
-def trim_record(node: str, part: str, before: int, after: int, limit: int) -> TrimRecord:
-    return {"node": node, "part": part, "tokens_before": before, "tokens_after": after, "limit": limit}
+def trim_record(node: str, part: str, before: int, after: int, limit: int) -> Intervention:
+    return {"node": node, "kind": "trim", "part": part, "tokens_before": before,
+            "tokens_after": after, "limit": limit}
+
+
+def describe_intervention(i: dict) -> str:
+    """One line for any kind of intervention - the only formatter.
+
+    Every reader (the Supervisor's view, the CLI, the live-check report) goes
+    through this. Part D found why: the Supervisor's view formatted every
+    entry as a trim, a hint-retry entry has no token counts, the KeyError was
+    caught by the Supervisor's own error handling, and the run silently fell
+    back to fixed_policy. A formatting assumption became a routing change.
+    """
+    kind = i.get("kind", "trim")
+    node = i.get("node", "?")
+    if kind == "trim":
+        return (f"{node} trimmed {i.get('part', '?')} {i.get('tokens_before', '?')}->"
+                f"{i.get('tokens_after', '?')} tokens (limit {i.get('limit', '?')})")
+    detail = (i.get("detail") or "")[:120]
+    return f"{node} {kind}" + (f": {detail}" if detail else "")

@@ -152,7 +152,12 @@ from research_copilot.request_budget import (
     text_tokens,
     trim_record,
 )
-from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
+from research_copilot.resilience import (
+    ModelCallFailure,
+    invoke_with_recovery,
+    is_invalid_tool_call,
+    model_fallback,
+)
 from research_copilot.models import get_chat_model
 from research_copilot.multi_agent_state import AgentBudget, ResearcherInput, ResearcherOutput, budget_of
 from research_copilot.retrieval import format_docs, get_retriever
@@ -287,8 +292,12 @@ def build_researcher(
     tools: Sequence[BaseTool] | None = None,
     retriever: BaseRetriever | None = None,
     max_iterations: int = DEFAULT_MAX_RESEARCH_ITERATIONS,
+    fallback_model: BaseChatModel | None = None,
 ) -> Runnable:
     """Compile the Researcher subgraph.
+
+    `fallback_model` (Part D): used if the primary's daily quota is spent.
+    Default: RESEARCH_COPILOT_FALLBACK_MODEL, resolved only when needed.
 
     Same injection pattern as `build_graph`: everything that talks to the
     outside world is an argument, so tests can run the agent offline. And the
@@ -508,19 +517,30 @@ def build_researcher(
         # Phase 7: a call to a tool it may not use is retried once with a hint
         # (resilience.py) - the hint that fits the call. A failed attempt still
         # spent tokens, so every attempt counts against the round budget.
+        recovered: list = []
         result, attempts = invoke_with_recovery(
             researcher_model(final=final), request,
             recoverable=is_invalid_tool_call,
             note=FINAL_RETRY_NOTE if final else INVALID_TOOL_NOTE, where="researcher",
             on_too_large=on_too_large,
+            # Part D: a spent daily quota switches to the fallback model, bound
+            # the same way (tools, or none on the reserved final call) and sized
+            # to its own limit. No fallback configured -> QuotaExhausted.
+            fallback=model_fallback(
+                lambda m: m if final else m.bind_tools(tools),
+                lambda limit_: build(limit_)[0],
+                override=fallback_model,
+            ),
+            on_intervention=lambda i: recovered.append({"node": "researcher", **i}),
         )
         trims.extend(smaller)
+        trims.extend(recovered)
         iterations = state.get("research_iterations", 0) + attempts
         update: dict = {"research_iterations": iterations}
         if trims:
             # Visible, like every other intervention: appended to the
             # Researcher's own trim log for this turn.
-            update["researcher_trims"] = [*(state.get("researcher_trims") or []), *trims]
+            update["researcher_interventions"] = [*(state.get("researcher_interventions") or []), *trims]
         if isinstance(result, ModelCallFailure):
             # Degrade, don't crash: end the loop here. The marker message has
             # no tool calls, so should_search routes to compile_notes, which

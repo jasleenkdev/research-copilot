@@ -150,7 +150,8 @@ def render(results: dict[str, dict], *, limits: dict | None = None,
                 f"  [{r['status']}] {r['id']} {r['title']}"
                 + (f" - failed: {', '.join(failed)}" if failed else "")
                 + (f" - ERROR {r['error']}" if r.get("error") else "")
-                + f" ({r.get('tokens', 0)} tokens, {r.get('seconds', 0)}s)"
+                + f" ({r.get('tokens', 0)} tokens, {r.get('seconds', 0)}s"
+                + (f", {r['sdk_retries']} SDK retries" if r.get("sdk_retries") else "") + ")"
             )
             o = r.get("observed", {})
             if r["kind"] == "structured_smoke":
@@ -172,6 +173,8 @@ def render(results: dict[str, dict], *, limits: dict | None = None,
                     lines.append(f"      FAILED CALL: {fc['agent']}/{fc['node']} (~{fc['est_tokens']} tokens)")
                 if o.get("unsupported_citations"):
                     lines.append(f"      UNSUPPORTED CITATIONS IN THE ANSWER: {o['unsupported_citations']}")
-                for t in o.get("trims") or []:
-                    lines.append(f"      TRIMMED: {t['node']} {t['part']} {t['tokens_before']}->{t['tokens_after']} (limit {t['limit']})")
+                from research_copilot.request_budget import describe_intervention
+
+                for t in o.get("trims") or o.get("interventions") or []:
+                    lines.append(f"      INTERVENTION: {describe_intervention(t)}")
     return "\n".join(lines) + "\n"

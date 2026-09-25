@@ -179,6 +179,8 @@ def build_multi_agent_graph(
     memory_strategy: str | None = None,
     max_history_tokens: int | None = None,
     summary_model: BaseChatModel | None = None,
+    # --- Part D ---
+    fallback_model: BaseChatModel | None = None,
 ) -> Runnable:
     """Wire up and compile the multi-agent graph.
 
@@ -188,6 +190,38 @@ def build_multi_agent_graph(
     production. A cheap fast model can research, a stronger one can write, and
     (6.3) a different one can judge. It also lets a test script each agent
     independently and assert on exactly what each one was shown.
+
+    (Written in Part D: the 6.2-6.4 notes below were meant to be here since
+    those steps, but the edits that added them never landed. An unchecked
+    string replacement matched nothing and failed silently. They are filled
+    in now.)
+
+    6.2:
+      supervisor_model  the model in the routing seat.
+      routing           "supervisor" (a model decides) or "fixed" (the fixed
+                        hand-off as a policy, no model). Same graph either way.
+      dispatch_caps     per-turn dispatch caps, merged over the defaults
+                        (`default_dispatch_caps`). They bound the hub.
+
+    6.3:
+      enable_critic     put the Critic on the Supervisor's roster.
+      critic_model, critic_tools
+                        the Critic's model and citation verifier.
+      require_approval  a human gate (Phase 4's interrupt). Needs a checkpointer.
+      max_revisions     rejection rounds per turn, from either reviewer.
+      max_critic_iterations, max_writer_calls, max_research_iterations
+                        per-agent budgets: model calls per revision round.
+
+    6.4:
+      memory_strategy, max_history_tokens
+                        Phase 4's pruning policy for the shared transcript.
+      summary_model     the model for "summarize", built lazily.
+
+    Part D:
+      fallback_model    what every agent switches to when the primary's daily
+                        quota is spent. Default: RESEARCH_COPILOT_FALLBACK_MODEL,
+                        resolved only when needed. If none is configured, a
+                        spent quota stops the run (QuotaExhausted).
     """
 
     # ------------------------------------------------------------------ agents
@@ -197,12 +231,15 @@ def build_multi_agent_graph(
         tools=tools,
         retriever=retriever,
         max_iterations=max_research_iterations,
+        fallback_model=fallback_model,
     )
     write_draft = make_writer(
-        model=writer_model or model, max_calls=max_writer_calls, max_revisions=max_revisions
+        model=writer_model or model, max_calls=max_writer_calls, max_revisions=max_revisions,
+        fallback_model=fallback_model,
     )
     critic = build_critic(
-        model=critic_model or model, tools=critic_tools, max_iterations=max_critic_iterations
+        model=critic_model or model, tools=critic_tools, max_iterations=max_critic_iterations,
+        fallback_model=fallback_model,
     )
     round_caps = {
         "researcher": max_research_iterations,
@@ -223,6 +260,7 @@ def build_multi_agent_graph(
         enable_critic=enable_critic,
         max_revisions=max_revisions,
         routing=routing,
+        fallback_model=fallback_model,
     )
 
     if require_approval and checkpointer is None:
@@ -616,9 +654,10 @@ def per_turn_reset() -> dict:
         "research_outcome": "",
         "draft": "",
         "unsupported_citations": [],
-        "researcher_trims": [],
-        "writer_trims": [],
-        "critic_trims": [],
+        "researcher_interventions": [],
+        "writer_interventions": [],
+        "critic_interventions": [],
+        "supervisor_interventions": [],
         "researcher_brief": "",
         "next_agent": "",
         "dispatches": {},

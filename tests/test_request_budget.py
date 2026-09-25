@@ -103,23 +103,23 @@ def search_call(query, call_id):
     return AIMessage(content="", tool_calls=[{"name": "search_arxiv", "args": {"query": query}, "id": call_id, "type": "tool_call"}])
 
 
-def test_researcher_trims_search_results_and_logs_it(small_limit):
+def test_researcher_interventions_search_results_and_logs_it(small_limit):
     model = scripted(search_call("a", "1"), search_call("b", "2"), "- Findings: x\n- Sources: y\n- Gaps: none")
     out = build_researcher(model=model, tools=[big_search], max_iterations=5).invoke(researcher_input())
     # Every request after results came back is inside the limit (estimated).
     from research_copilot.request_budget import estimate
 
     assert all(estimate(r) <= small_limit * 1.1 for r in model.requests[1:])
-    assert out["researcher_trims"]
-    assert out["researcher_trims"][0]["node"] == "researcher"
-    assert "search results" in out["researcher_trims"][0]["part"]
+    assert out["researcher_interventions"]
+    assert out["researcher_interventions"][0]["node"] == "researcher"
+    assert "search results" in out["researcher_interventions"][0]["part"]
     assert out["research_outcome"] == "findings"
 
 
 def test_researcher_final_call_trims_the_flattened_results(small_limit):
     model = scripted(search_call("a", "1"), "- Findings: x\n- Sources: y\n- Gaps: none")
     out = build_researcher(model=model, tools=[big_search], max_iterations=2).invoke(researcher_input())
-    assert any(t["part"] == "search results (final call)" for t in out["researcher_trims"])
+    assert any(t["part"] == "search results (final call)" for t in out["researcher_interventions"])
 
 
 def test_critic_never_cuts_the_draft_only_the_notes(small_limit):
@@ -131,20 +131,20 @@ def test_critic_never_cuts_the_draft_only_the_notes(small_limit):
     sent = text_of(critic.requests[0])
     assert draft.strip() in sent
     assert "characters cut to fit" in sent
-    assert out["critic_trims"][0]["part"] == "research notes"
+    assert out["critic_interventions"][0]["part"] == "research notes"
 
 
-def test_writer_trims_notes_and_logs_it(small_limit):
+def test_writer_interventions_notes_and_logs_it(small_limit):
     writer = scripted("An answer.")
     out = make_writer(model=writer)({"question": "Q", "research_notes": LONG, "messages": []})
     assert "characters cut to fit" in text_of(writer.requests[0])
-    assert out["writer_trims"][0]["part"] == "research notes"
+    assert out["writer_interventions"][0]["part"] == "research notes"
 
 
 def test_no_trim_no_log_under_the_default_limit(monkeypatch):
     monkeypatch.delenv("RESEARCH_COPILOT_MAX_REQUEST_TOKENS", raising=False)
     out = make_writer(model=scripted("An answer."))({"question": "Q", "research_notes": "short notes", "messages": []})
-    assert "writer_trims" not in out
+    assert "writer_interventions" not in out
 
 
 # --- the provider still refuses -------------------------------------------------------------
@@ -159,7 +159,10 @@ def test_provider_refusal_retries_once_smaller_and_logs_it(monkeypatch):
     assert out["verdict"] == "approve"
     assert len(critic.requests) == 2
     assert len(text_of(critic.requests[1])) < len(text_of(critic.requests[0]))
-    assert [t["limit"] for t in out["critic_trims"]] == [4000, 2800]
+    # Part D: the retry itself is an intervention too, beside the two trims.
+    kinds = [i["kind"] for i in out["critic_interventions"]]
+    assert kinds.count("trim") == 2 and "too_large_retry" in kinds
+    assert [i["limit"] for i in out["critic_interventions"] if i["kind"] == "trim"] == [4000, 2800]
 
 
 def test_a_request_that_can_never_fit_degrades_instead_of_crashing(monkeypatch):
@@ -176,11 +179,11 @@ def test_a_request_that_can_never_fit_degrades_instead_of_crashing(monkeypatch):
 
 def test_supervisor_is_shown_the_trims():
     view = render_supervisor_view(
-        {"question": "Q", "critic_trims": [{"node": "critic", "part": "research notes",
+        {"question": "Q", "critic_interventions": [{"node": "critic", "kind": "trim", "part": "research notes",
                                             "tokens_before": 9000, "tokens_after": 5000, "limit": 6500}]},
         {"researcher": 2, "writer": 2},
     )
-    assert "Requests trimmed to fit the size limit this turn: critic research notes 9000->5000" in view
+    assert "Interventions on agents' attempts this turn: critic trimmed research notes 9000->5000" in view
 
 
 def test_trims_reach_the_parent_state_and_reset_each_turn(small_limit):
@@ -195,9 +198,9 @@ def test_trims_reach_the_parent_state_and_reset_each_turn(small_limit):
     )
     config = {"configurable": {"thread_id": "t"}}
     first = run_multi_agent("Q1", graph=g, config=config)
-    assert first["researcher_trims"]
+    assert first["researcher_interventions"]
     second = run_multi_agent("Q2", graph=g, config=config)  # no search: nothing to trim
-    assert second["researcher_trims"] == []
+    assert second["researcher_interventions"] == []
 
 
 def test_call_recorder_names_the_node_and_subgraph_of_every_call():
