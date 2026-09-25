@@ -468,6 +468,16 @@ def render_supervisor_view(
         f"Latest research pass: {outcome}",
         f"Draft {draft_note}:\n{_excerpt(draft)}",
     ]
+    trims = [*(state.get("researcher_trims") or []), *(state.get("writer_trims") or []),
+             *(state.get("critic_trims") or [])]
+    if trims:
+        # Phase 7: context that was cut to fit the per-request size limit.
+        # A fact about what each agent actually saw - e.g. a Critic that judged
+        # against trimmed notes - shown like every other intervention.
+        sections.append(
+            "Requests trimmed to fit the size limit this turn: "
+            + "; ".join(f"{t['node']} {t['part']} {t['tokens_before']}->{t['tokens_after']} tokens" for t in trims)
+        )
     if state.get("unsupported_citations"):
         # Phase 7: shown as a fact, like citation_checks. What to do about it is
         # the Supervisor's call; no guard acts on it (see the README's note on

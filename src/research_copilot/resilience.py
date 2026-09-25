@@ -73,6 +73,16 @@ def is_invalid_tool_call(exc: Exception) -> bool:
     return "tool_use_failed" in text or "not in request.tools" in text
 
 
+def is_request_too_large(exc: Exception) -> bool:
+    """The provider refused the request for its size (Phase 7).
+
+    Groq: 413 "Request too large". Anthropic: 400 "prompt is too long".
+    Recognised by message, for the same reason as `is_invalid_tool_call`.
+    """
+    text = str(exc)
+    return "Request too large" in text or "Error code: 413" in text or "prompt is too long" in text
+
+
 def _with_note(request: Sequence[BaseMessage], note: str) -> list[BaseMessage]:
     """Insert `note` after the leading system messages.
 
@@ -95,24 +105,36 @@ def invoke_with_recovery(
     recoverable: Callable[[Exception], bool],
     note: str,
     where: str,
+    on_too_large: Callable[[], Sequence[BaseMessage]] | None = None,
 ) -> tuple[AIMessage | ModelCallFailure, int]:
-    """Call `runnable`; on a recoverable failure retry once with `note`.
+    """Call `runnable`; on a recoverable failure retry once.
 
-    Returns (message or failure, attempts made). Non-recoverable exceptions
-    propagate unchanged - a missing API key or a malformed request is a bug to
-    surface, not a condition to paper over.
+    Two recoverable kinds, each with its own retry:
+      - `recoverable(exc)` (e.g. an invented tool call): retry with `note` added
+      - the provider refused the request as too large, and the caller gave
+        `on_too_large`: retry with the smaller request it builds (Phase 7,
+        request_budget.py). No note - the problem was size, not behaviour.
+
+    Returns (message or failure, attempts made). Anything else propagates
+    unchanged - a missing API key or a malformed request is a bug to surface,
+    not a condition to paper over.
     """
     try:
         return runnable.invoke(list(request)), 1
-    except Exception as exc:  # noqa: BLE001 - filtered by `recoverable`
-        if not recoverable(exc):
-            raise
-        log.warning("%s: model call failed (%s); retrying once with a hint", where, exc)
+    except Exception as exc:  # noqa: BLE001 - filtered below
         first = exc
+        if on_too_large is not None and is_request_too_large(exc):
+            log.warning("%s: request refused as too large (%s); retrying once, smaller", where, exc)
+            retry_request = list(on_too_large())
+        elif recoverable(exc):
+            log.warning("%s: model call failed (%s); retrying once with a hint", where, exc)
+            retry_request = _with_note(request, note)
+        else:
+            raise
     try:
-        return runnable.invoke(_with_note(request, note)), 2
+        return runnable.invoke(retry_request), 2
     except Exception as exc:  # noqa: BLE001
-        if not recoverable(exc):
+        if not (recoverable(exc) or is_request_too_large(exc)):
             raise
         log.warning("%s: retry failed too (%s); handing back a failure", where, exc)
         return ModelCallFailure(error=f"{type(first).__name__}: {first} | retry: {exc}", attempts=2), 2

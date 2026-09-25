@@ -92,6 +92,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
+from research_copilot.request_budget import TrimRecord
 from research_copilot.state import Mode
 
 # 6.2. How the Researcher's *latest pass* went, as a value code can branch on.
@@ -340,6 +341,10 @@ class MultiAgentState(TypedDict, total=False):
 
     # 6.2: how the latest research pass went. See ResearchOutcome above.
     research_outcome: ResearchOutcome | Literal[""]
+    # Phase 7: every time a Researcher request was cut to fit the per-request
+    # size limit this turn (request_budget.py). One field per agent, owned by
+    # that agent - the same visibility rule as the Supervisor's overrides.
+    researcher_trims: list[TrimRecord]
 
     # --- the Writer's output (owner: writer) ------------------------------------
     # The answer as written, before it is committed to `messages`. Same reason
@@ -351,6 +356,8 @@ class MultiAgentState(TypedDict, total=False):
     # after the Writer's one corrective retry. Empty is the normal case. See
     # `unsupported_citations` in agents/writer.py.
     unsupported_citations: list[str]
+    # Phase 7: request-size trims the Writer made this turn.
+    writer_trims: list[TrimRecord]
 
     # --- the Supervisor's decisions (owner: supervisor) -------------------------
     # CONCEPT (6.2): the Supervisor owns the *routing* fields, and no content.
@@ -428,6 +435,8 @@ class MultiAgentState(TypedDict, total=False):
     # `research_outcome`. The Supervisor reads "2401.00001: not_found" as a
     # fact, instead of inferring it from the critique's prose.
     citation_checks: list[CitationCheck]
+    # Phase 7: request-size trims the Critic made this turn.
+    critic_trims: list[TrimRecord]
 
     # --- the human reviewer's output (owner: review_draft) ---------------------
     # Phase 4's `human_feedback`, plus the two things a human verdict carries
@@ -487,6 +496,8 @@ class ResearcherInput(TypedDict, total=False):
     documents: list[Document]
     # --- 6.3 --- its own budget entry, to know what is left this round
     budgets: Annotated[dict[str, AgentBudget], merge_budgets]
+    # --- Phase 7 --- its own earlier trims this turn, to append to
+    researcher_trims: list[TrimRecord]
 
 
 class ResearcherOutput(TypedDict, total=False):
@@ -504,6 +515,7 @@ class ResearcherOutput(TypedDict, total=False):
     research_iterations: int
     research_outcome: ResearchOutcome | Literal[""]
     budgets: Annotated[dict[str, AgentBudget], merge_budgets]
+    researcher_trims: list[TrimRecord]
 
 
 class CriticInput(TypedDict, total=False):
@@ -526,6 +538,7 @@ class CriticInput(TypedDict, total=False):
     draft: str
     research_notes: str
     budgets: Annotated[dict[str, AgentBudget], merge_budgets]
+    critic_trims: list[TrimRecord]
 
 
 class CriticOutput(TypedDict, total=False):
@@ -535,6 +548,7 @@ class CriticOutput(TypedDict, total=False):
     verdict: Verdict | Literal[""]
     citation_checks: list[CitationCheck]
     budgets: Annotated[dict[str, AgentBudget], merge_budgets]
+    critic_trims: list[TrimRecord]
 
 
 # --------------------------------------------------------------------------
@@ -559,7 +573,7 @@ OWNERS: dict[str, frozenset[str]] = {
     # Must match ResearcherOutput exactly. tests/test_multi_agent.py checks it.
     "researcher": frozenset(ResearcherOutput.__annotations__),
     # 6.3: and its own `budgets` entry - see BUDGET_ENTRY_OWNERS.
-    "writer": frozenset({"draft", "budgets", "unsupported_citations"}),
+    "writer": frozenset({"draft", "budgets", "unsupported_citations", "writer_trims"}),
     # Must match CriticOutput exactly, same check as the Researcher.
     "critic": frozenset(CriticOutput.__annotations__),
     "review_draft": frozenset({"human_verdict", "human_feedback", "human_edit"}),

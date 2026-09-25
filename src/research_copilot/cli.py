@@ -1239,6 +1239,15 @@ def _print_multi_agent_state(state: dict) -> None:
         )
     if state.get("revisions"):
         print(f"  start_revision -> revisions: {state['revisions']}", file=sys.stderr)
+    trims = [*(state.get("researcher_trims") or []), *(state.get("writer_trims") or []),
+             *(state.get("critic_trims") or [])]
+    for t in trims:
+        # Phase 7: request-size trims are interventions, printed like overrides.
+        print(
+            f"  [trimmed]      {t['node']}: {t['part']} {t['tokens_before']} -> {t['tokens_after']} "
+            f"tokens (limit {t['limit']})",
+            file=sys.stderr,
+        )
     budgets = state.get("budgets") or {}
     if budgets:
         print(

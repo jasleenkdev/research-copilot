@@ -113,6 +113,7 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
+from research_copilot.request_budget import RETRY_FACTOR, estimate, fit_text, max_request_tokens, trim_record
 from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
 # Phase 5's parsers, imported rather than copied: one definition of what a
 # verdict is, shared by the Phase 5 critic, the Phase 4 human gate, and this
@@ -241,29 +242,44 @@ def build_critic(
         """The one judging call: draft, notes, and lookup results as facts."""
         sub_questions = "\n".join(f"- {q}" for q in (state.get("sub_questions") or [])) or "(none)"
         lookups = "\n".join(state.get("lookups") or []) or "(the draft cites no arXiv papers)"
-        request = [
-            SystemMessage(content=CRITIC_AGENT_PROMPT),
-            HumanMessage(
-                content=(
-                    f"Question: {state.get('question', '')}\n\n"
-                    f"Sub-questions the plan called for (may be empty):\n{sub_questions}\n\n"
-                    f"Research notes the draft was written from:\n"
-                    f"{(state.get('research_notes') or '').strip() or '(none)'}\n\n"
-                    f"Draft answer:\n"
-                    f"{(state.get('draft') or '').strip() or '(the Writer produced an empty draft)'}\n\n"
-                    f"Citation checks (already run; treat as fact):\n{lookups}"
+        notes = (state.get("research_notes") or "").strip() or "(none)"
+        draft = (state.get("draft") or "").strip() or "(the Writer produced an empty draft)"
+        limit = max_request_tokens()
+        trims: list = []
+
+        def build(budget: int) -> list[BaseMessage]:
+            """Phase 7 (request_budget.py): the draft is load-bearing and never
+            cut - a Critic judging half a draft is worse than one judging it
+            against part of the notes. The notes are the material part."""
+            def human(notes_text: str) -> HumanMessage:
+                return HumanMessage(
+                    content=(
+                        f"Question: {state.get('question', '')}\n\n"
+                        f"Sub-questions the plan called for (may be empty):\n{sub_questions}\n\n"
+                        f"Research notes the draft was written from:\n{notes_text}\n\n"
+                        f"Draft answer:\n{draft}\n\n"
+                        f"Citation checks (already run; treat as fact):\n{lookups}"
+                    )
                 )
-            ),
-        ]
+            base = estimate([SystemMessage(content=CRITIC_AGENT_PROMPT), human("")])
+            fitted, before, after = fit_text(notes, budget - base)
+            if after < before:
+                trims.append(trim_record("critic", "research notes", before, after, budget))
+            return [SystemMessage(content=CRITIC_AGENT_PROMPT), human(fitted)]
+
         result, attempts = invoke_with_recovery(
-            critic_model_runnable(), request,
+            critic_model_runnable(), build(limit),
             recoverable=is_invalid_tool_call, note=INVALID_TOOL_NOTE, where="critic",
+            on_too_large=lambda: build(int(limit * RETRY_FACTOR)),
         )
         iterations = state.get("critic_iterations", 0) + attempts
+        update: dict = {"critic_iterations": iterations}
+        if trims:
+            update["critic_trims"] = [*(state.get("critic_trims") or []), *trims]
         if isinstance(result, ModelCallFailure):
             marker = AIMessage(content="", additional_kwargs={"model_error": result.error})
-            return {"critic_messages": [marker], "critic_iterations": iterations}
-        return {"critic_messages": [result], "critic_iterations": iterations}
+            return {**update, "critic_messages": [marker]}
+        return {**update, "critic_messages": [result]}
 
     def compile_verdict(state: CriticState) -> dict:
         """Turn the model's reply into the fields that leave the subgraph."""

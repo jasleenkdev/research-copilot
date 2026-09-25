@@ -160,6 +160,16 @@ def render(results: dict[str, dict], *, limits: dict | None = None,
                 lines.append(f"      verdict={o.get('verdict')} checks={o.get('citation_checks')}")
                 lines.append(f"      critique: {(o.get('critique') or '')[:300]}")
             if r["kind"] == "e2e":
-                lines.append(f"      routes={o.get('routes')} revisions={o.get('revisions')} "
-                             f"verdict={o.get('verdict')}")
+                if o.get("routes") is not None:
+                    lines.append(f"      routes={o.get('routes')} revisions={o.get('revisions')} "
+                                 f"verdict={o.get('verdict')}")
+                if o.get("calls"):
+                    lines.append(f"      model calls: {len(o['calls'])}, largest request ~{o.get('largest_request')} tokens")
+                    for c in o["calls"]:
+                        lines.append(f"        {c['agent']:>10}/{c['node']:<16} ~{c['est_tokens']:>6} tok  {c['status']}")
+                if o.get("failed_call"):
+                    fc = o["failed_call"]
+                    lines.append(f"      FAILED CALL: {fc['agent']}/{fc['node']} (~{fc['est_tokens']} tokens)")
+                for t in o.get("trims") or []:
+                    lines.append(f"      TRIMMED: {t['node']} {t['part']} {t['tokens_before']}->{t['tokens_after']} (limit {t['limit']})")
     return "\n".join(lines) + "\n"

@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from langchain_core.callbacks import get_usage_metadata_callback
+from langchain_core.callbacks import BaseCallbackHandler, get_usage_metadata_callback
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
@@ -374,6 +374,46 @@ def rescore(path: Path, *, log: Callable[[str], None] = print) -> list[str]:
     return changed
 
 
+class CallRecorder(BaseCallbackHandler):
+    """Records every chat-model call in a run: which graph node made it, from
+    inside which subgraph, and how big the request was. (Phase 7, A1)
+
+    Added after E2E01 died on `413 Request too large` with no record of which
+    call it was. LangGraph tags each model call's callback metadata with the
+    node that made it (`langgraph_node`) and its checkpoint namespace, whose
+    first segment is the top-level node - the *agent* - the call ran under
+    (`researcher:<task-id>|research_model:<task-id>`). So even a run that
+    crashes leaves a trail, and its last entry is the call that failed.
+    """
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def on_chat_model_start(self, serialized, messages, *, run_id, metadata=None, **kwargs):
+        from research_copilot.request_budget import estimate
+
+        metadata = metadata or {}
+        self.calls.append({
+            "node": metadata.get("langgraph_node", "?"),
+            "agent": (metadata.get("checkpoint_ns") or "").split(":")[0] or "(parent)",
+            "est_tokens": estimate(messages[0]) if messages else 0,
+            "status": "started",
+            "run_id": str(run_id),
+        })
+
+    def _mark(self, run_id, status):
+        for call in reversed(self.calls):
+            if call["run_id"] == str(run_id):
+                call["status"] = status
+                return
+
+    def on_llm_end(self, response, *, run_id, **kwargs):
+        self._mark(run_id, "ok")
+
+    def on_llm_error(self, error, *, run_id, **kwargs):
+        self._mark(run_id, f"error: {str(error)[:120]}")
+
+
 def _run_e2e(s: Scenario, cfg):
     from research_copilot.graph import final_answer
     from research_copilot.multi_agent_graph import build_multi_agent_graph, multi_agent_turn_input
@@ -385,14 +425,28 @@ def _run_e2e(s: Scenario, cfg):
         critic_tools=[cfg.verify_tool] if cfg.verify_tool else None,
         enable_critic=s.inputs["critic"], max_revisions=1, memory_strategy="none",
     )
-    state = graph.invoke(multi_agent_turn_input(s.inputs["question"]), {"recursion_limit": 80})
+    recorder = CallRecorder()
+    try:
+        state = graph.invoke(
+            multi_agent_turn_input(s.inputs["question"]),
+            {"recursion_limit": 80, "callbacks": [recorder]},
+        )
+    except Exception as exc:
+        # Keep the call trail even when the run dies: its last entry is the
+        # call that failed. Re-raised so the scenario is still an error.
+        exc.calls = recorder.calls  # type: ignore[attr-defined]
+        raise
     log = state.get("supervisor_log", [])
     return (
         {"answer": final_answer(state),
          "routes": [(e["proposed"], e["routed_to"], e["override"]) for e in log],
          "rationales": [e["rationale"] for e in log],
          "dispatches": state.get("dispatches"), "revisions": state.get("revisions"),
-         "verdict": state.get("verdict"), "budgets": state.get("budgets")},
+         "verdict": state.get("verdict"), "budgets": state.get("budgets"),
+         "calls": [{k: v for k, v in c.items() if k != "run_id"} for c in recorder.calls],
+         "largest_request": max((c["est_tokens"] for c in recorder.calls), default=0),
+         "trims": [*(state.get("researcher_trims") or []), *(state.get("writer_trims") or []),
+                   *(state.get("critic_trims") or [])]},
         {"finished": bool(state.get("messages")) and state["messages"][-1].type == "ai",
          "no_fallbacks": not any(e["override"] == "fallback to fixed policy" for e in log)},
         True,
@@ -477,6 +531,11 @@ def run(
             except Exception as exc:  # noqa: BLE001 - recorded, not raised
                 observed, checks, review = {}, {}, False
                 error = f"{type(exc).__name__}: {exc}"
+                calls = getattr(exc, "calls", None)
+                if calls:
+                    trail = [{k: v for k, v in c.items() if k != "run_id"} for c in calls]
+                    observed = {"calls": trail, "failed_call": trail[-1],
+                                "largest_request": max(c["est_tokens"] for c in trail)}
         tokens = sum(u.get("total_tokens", 0) for u in usage.usage_metadata.values())
         cfg.window.append((cfg.clock(), tokens))
 

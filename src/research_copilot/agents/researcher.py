@@ -144,6 +144,14 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from research_copilot.agent_loop import _execute_tool_call
+from research_copilot.request_budget import (
+    RETRY_FACTOR,
+    estimate,
+    fit_text,
+    max_request_tokens,
+    text_tokens,
+    trim_record,
+)
 from research_copilot.resilience import ModelCallFailure, invoke_with_recovery, is_invalid_tool_call
 from research_copilot.models import get_chat_model
 from research_copilot.multi_agent_state import ResearcherInput, ResearcherOutput, budget_of
@@ -425,12 +433,16 @@ def build_researcher(
                     content=BRIEF_INSTRUCTION.format(brief=state["researcher_brief"].strip())
                 )
             )
+        limit = max_request_tokens()
+        trims: list = []
         if state.get("research_notes", "").strip():
-            instructions.append(
-                SystemMessage(
-                    content=FOLLOW_UP_INSTRUCTION.format(previous=state["research_notes"].strip())
-                )
-            )
+            # Phase 7: the previous notes are shown only so the model does not
+            # repeat searches - the merge itself is code - so they are material,
+            # capped at 40% of the request limit.
+            previous, before, after = fit_text(state["research_notes"].strip(), int(limit * 0.4))
+            if after < before:
+                trims.append(trim_record("researcher", "previous notes", before, after, limit))
+            instructions.append(SystemMessage(content=FOLLOW_UP_INSTRUCTION.format(previous=previous)))
 
         # Phase 7 A1 (day two): the two fixes for a model that never stops
         # searching. Same discipline as should_revise and the Supervisor's
@@ -445,25 +457,53 @@ def build_researcher(
         final = left <= 1
         instructions.append(SystemMessage(content=BUDGET_LINE.format(left=left, cap=max_iterations)))
 
-        if final:
-            # The reserved last call (see researcher_model): no tools, and the
-            # private tool loop flattened into one plain-text turn.
-            results = "\n\n".join(
-                m.text.strip()
-                for m in state.get("research_messages", [])
-                if isinstance(m, ToolMessage) and m.text.strip()
-            ) or "(no searches ran this round)"
-            request = [
-                *instructions,
-                *state.get("messages", []),
-                HumanMessage(content=FINAL_RESULTS_TURN.format(results=results)),
+        history = list(state.get("messages", []))
+        loop = list(state.get("research_messages", []))
+
+        def build(budget: int) -> tuple[list[BaseMessage], list]:
+            """The request, sized to `budget` (Phase 7, request_budget.py).
+
+            Load-bearing: instructions, the conversation, the loop's own AI
+            turns. Material: the search results - cut from the tail of each
+            result, evenly, when they do not fit.
+            """
+            if final:
+                # The reserved last call (see researcher_model): no tools, and
+                # the private tool loop flattened into one plain-text turn.
+                results = "\n\n".join(
+                    m.text.strip() for m in loop if isinstance(m, ToolMessage) and m.text.strip()
+                ) or "(no searches ran this round)"
+                base = estimate([*instructions, *history, HumanMessage(content=FINAL_RESULTS_TURN.format(results=""))])
+                fitted, before, after = fit_text(results, budget - base)
+                cut = [trim_record("researcher", "search results (final call)", before, after, budget)] if after < before else []
+                return [*instructions, *history, HumanMessage(content=FINAL_RESULTS_TURN.format(results=fitted))], cut
+            tool_msgs = [m for m in loop if isinstance(m, ToolMessage)]
+            base = estimate([*instructions, *history, *(m for m in loop if not isinstance(m, ToolMessage))])
+            total = sum(text_tokens(m.text) for m in tool_msgs)
+            if not tool_msgs or base + total <= budget:
+                return [*instructions, *history, *loop], []
+            share = max(100, (budget - base) // len(tool_msgs))
+            fitted_loop = [
+                ToolMessage(content=fit_text(m.text, share)[0], tool_call_id=m.tool_call_id, name=m.name)
+                if isinstance(m, ToolMessage) else m
+                for m in loop
             ]
-        else:
-            request = [
-                *instructions,
-                *state.get("messages", []),
-                *state.get("research_messages", []),
+            after = sum(text_tokens(m.text) for m in fitted_loop if isinstance(m, ToolMessage))
+            return [*instructions, *history, *fitted_loop], [
+                trim_record("researcher", f"search results ({len(tool_msgs)} results)", total, after, budget)
             ]
+
+        request, cut = build(limit)
+        trims.extend(cut)
+        smaller: list = []
+
+        def on_too_large():
+            # The provider refused it anyway (the estimate is approximate):
+            # rebuild at 70% and record that trim too.
+            retry_request, retry_cut = build(int(limit * RETRY_FACTOR))
+            smaller.extend(retry_cut or [trim_record("researcher", "whole request (provider refused)", estimate(request), estimate(retry_request), int(limit * RETRY_FACTOR))])
+            return retry_request
+
         # Phase 7: a call to a tool it may not use is retried once with a hint
         # (resilience.py) - the hint that fits the call. A failed attempt still
         # spent tokens, so every attempt counts against the round budget.
@@ -471,15 +511,22 @@ def build_researcher(
             researcher_model(final=final), request,
             recoverable=is_invalid_tool_call,
             note=FINAL_RETRY_NOTE if final else INVALID_TOOL_NOTE, where="researcher",
+            on_too_large=on_too_large,
         )
+        trims.extend(smaller)
         iterations = state.get("research_iterations", 0) + attempts
+        update: dict = {"research_iterations": iterations}
+        if trims:
+            # Visible, like every other intervention: appended to the
+            # Researcher's own trim log for this turn.
+            update["researcher_trims"] = [*(state.get("researcher_trims") or []), *trims]
         if isinstance(result, ModelCallFailure):
             # Degrade, don't crash: end the loop here. The marker message has
             # no tool calls, so should_search routes to compile_notes, which
             # hands over whatever results came back (outcome model_error).
             marker = AIMessage(content="", additional_kwargs={"model_error": result.error})
-            return {"research_messages": [marker], "research_iterations": iterations}
-        return {"research_messages": [result], "research_iterations": iterations}
+            return {**update, "research_messages": [marker]}
+        return {**update, "research_messages": [result]}
 
     def research_tools(state: ResearcherState) -> dict:
         """Run the tools the last research step asked for. Phase 3's `call_tool`,

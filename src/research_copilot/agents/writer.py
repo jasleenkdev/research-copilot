@@ -68,6 +68,8 @@ import re
 
 from research_copilot.models import get_chat_model
 from research_copilot.multi_agent_state import MultiAgentState, budget_of
+from research_copilot.request_budget import RETRY_FACTOR, estimate, fit_text, max_request_tokens, trim_record
+from research_copilot.resilience import ModelCallFailure, invoke_with_recovery
 from research_copilot.tools.citations import extract_citations
 # Phase 5's revision instruction, reused verbatim: the Writer is the node that
 # inherits call_model's revising half, so it inherits the prompt too.
@@ -254,32 +256,56 @@ def make_writer(
             history = history[:-1]
 
         notes = state.get("research_notes", "").strip() or NO_NOTES
-        final_turn = HumanMessage(
-            content=f"Research notes:\n{notes}\n\nQuestion: {state.get('question', '')}"
-        )
+        question_part = f"\n\nQuestion: {state.get('question', '')}"
+        limit = max_request_tokens()
+        trims: list = []
 
-        request = [*instructions, *history, final_turn]
-        draft = writer_model().invoke(request).text
-        calls = 1
+        def build(budget: int, extra: list[BaseMessage] = ()) -> list[BaseMessage]:
+            """The request, with the notes (the only material part) cut to fit
+            `budget` (Phase 7, request_budget.py). `extra` is the retry turn,
+            whose size has to be paid for out of the notes too."""
+            base = estimate([*instructions, *history, HumanMessage(content="Research notes:\n" + question_part), *extra])
+            fitted, before, after = fit_text(notes, budget - base)
+            if after < before:
+                trims.append(trim_record("writer", "research notes", before, after, budget))
+            final_turn = HumanMessage(content=f"Research notes:\n{fitted}{question_part}")
+            return [*instructions, *history, final_turn, *extra]
+
+        def call(extra: list[BaseMessage] = ()) -> tuple[str, int]:
+            request = build(limit, extra)
+            result, attempts = invoke_with_recovery(
+                writer_model(), request,
+                recoverable=lambda exc: False, note="", where="writer",
+                on_too_large=lambda: build(int(limit * RETRY_FACTOR), extra),
+            )
+            # A Writer whose request cannot be served produces no draft; the
+            # Supervisor sees there is nothing to finish. It does not crash.
+            return ("" if isinstance(result, ModelCallFailure) else result.text), attempts
+
+        draft, calls = call()
 
         # Phase 7: one retry, naming the citations that do not come from the
         # notes. The same shape as resilience.py's recovery - a specific hint,
-        # once - applied to bad *output* rather than a failed *call*.
+        # once - applied to bad *output* rather than a failed *call*. Checked
+        # against the full notes, not the trimmed copy the model saw.
         issues = unsupported_citations(draft, notes if notes != NO_NOTES else "", mode=mode)
         if issues:
-            retry = [*request, AIMessage(content=draft),
-                     HumanMessage(content=UNSUPPORTED_CITATIONS_NOTE.format(items="; ".join(issues)))]
-            draft = writer_model().invoke(retry).text
-            calls = 2
+            draft, more = call([AIMessage(content=draft),
+                                HumanMessage(content=UNSUPPORTED_CITATIONS_NOTE.format(items="; ".join(issues)))])
+            calls += more
             issues = unsupported_citations(draft, notes if notes != NO_NOTES else "", mode=mode)
 
         used = budget_of(state, "writer", max_calls)["used"] + calls
-        # The Writer's fields: its draft, what is still unsupported in it, and
-        # its own budget entry. `owns("writer")` checks all three.
-        return {
+        # The Writer's fields: its draft, what is still unsupported in it, its
+        # request-size trims, and its own budget entry. `owns("writer")` checks
+        # all four.
+        update = {
             "draft": draft,
             "unsupported_citations": issues,
             "budgets": {"writer": {"used": used, "cap": max_calls}},
         }
+        if trims:
+            update["writer_trims"] = [*(state.get("writer_trims") or []), *trims]
+        return update
 
     return write_draft
