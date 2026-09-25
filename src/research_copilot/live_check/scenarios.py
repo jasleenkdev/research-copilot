@@ -114,6 +114,13 @@ KB_NOTES = (
 )
 
 
+def _fixture(name: str) -> str:
+    """Recorded material from real runs, kept under live_check/fixtures/."""
+    from pathlib import Path
+
+    return (Path(__file__).parent / "fixtures" / name).read_text()
+
+
 def _log(*routes: tuple[str, int] | str, briefs: dict[int, str] | None = None) -> list[dict]:
     """A supervisor_log with the given dispatch order. Each route is a name, or
     (name, revision)."""
@@ -378,6 +385,24 @@ SCENARIOS: list[Scenario] = [
              {"verdict": "reject", "found": ["2311.09476"]}, est_tokens=1500,
              note="Measures whether the Critic catches it unaided. A pass here would mean "
                   "the flag is redundant; a fail confirms the coordination gap."),
+
+    # --- 6 (Part B): the same gap at E2E01's scale ------------------------------
+    # CRT08 passed: in a two-citation draft the Critic catches an unresearched
+    # paper unaided. E2E01's draft cited 13. These use E2E01 v6's real answer as
+    # the draft, and notes rebuilt from its 12 legitimate sources (fixtures/).
+    # To pass, the critique must NAME 2408.12398 - a long draft can be
+    # rejected for another reason, and that would not count.
+    Scenario("CRT09", "6", "critic", "E2E01 scale: 13 citations, one unresearched, WITH the flag",
+             {"draft": _fixture("e2e01_v6_draft.md"), "research_notes": _fixture("e2e01_v6_notes.md"),
+              "question": "How are RAG pipelines evaluated?",
+              "unsupported_citations": ["arXiv 2408.12398"]},
+             {"verdict": "reject", "must_name": ["2408.12398"]}, est_tokens=6000),
+    Scenario("CRT10", "6", "critic", "CONTROL at E2E01 scale: the same, WITHOUT the flag",
+             {"draft": _fixture("e2e01_v6_draft.md"), "research_notes": _fixture("e2e01_v6_notes.md"),
+              "question": "How are RAG pipelines evaluated?"},
+             {"verdict": "reject", "must_name": ["2408.12398"]}, est_tokens=6000,
+             note="The situation E2E01's Critic was in. A fail here, with CRT09 passing, "
+                  "is the evidence that the flag matters at scale."),
 
     # --- 7: end to end (cost, latency, an overall read) -------------------------
     Scenario("E2E01", "7", "e2e", "Full run with the Critic",

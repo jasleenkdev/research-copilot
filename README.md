@@ -965,7 +965,7 @@ of budget mid-verification counts as a rejection (fail closed).
 
 During a turn, every state key has exactly one writer. Plain nodes are
 wrapped in `owns(...)`, which raises `OwnershipError` if a node returns a key
-(or a `budgets` entry) it does not own. Subgraphs are held to the rule by
+(since Phase 7 Part B, that includes any other agent's budget field) it does not own. Subgraphs are held to the rule by
 their `output_schema`, and a test keeps each schema equal to its `OWNERS`
 entry.
 
@@ -975,7 +975,7 @@ The deliberate exceptions, each written down:
 | --- | --- | --- |
 | `begin_turn` | every per-turn field | it is the turn boundary. It runs at START, before any agent, for every caller |
 | `prune_history` | `messages` (removals), `summary` | runs once, at the start of the turn, never while an agent works. `finalize_answer` only appends, at the end |
-| `start_revision` | every agent's `budgets` entry, `revisions` | the per-round reset site |
+| `start_revision` | every agent's budget field, `revisions` | the per-round reset site |
 
 A human edit goes into `human_edit`, never into the Writer's `draft`. The
 final state shows both.
@@ -1045,7 +1045,7 @@ stale *approval* approves nothing.
 | Counter | Scope | Reset by | What it bounds |
 | --- | --- | --- | --- |
 | `research_iterations` | one Researcher pass | (private start) | nothing: a report of that pass |
-| `budgets[agent]["used"]` | one **revision round** | `start_revision` | work inside a round, e.g. a Researcher sent back twice in a round shares one tool budget |
+| `<agent>_budget["used"]` (was `budgets[agent]`) | one **revision round** | `start_revision` | work inside a round, e.g. a Researcher sent back twice in a round shares one tool budget |
 | `dispatches[agent]` | one **turn** | `begin_turn` only, **never** `start_revision` | the hub: termination |
 | `revisions` | one **turn** | `begin_turn` only | rejection rounds (`max_revisions`) |
 
@@ -1055,13 +1055,16 @@ one schedule. A mutation that reset it per revision broke the termination
 test. Dispatch caps default to room for every allowed revision: Writer
 `2 + max_revisions`, Critic `1 + max_revisions` (0 when off), Researcher 2.
 
-`budgets` is `dict[str, AgentBudget]`, where `AgentBudget` is a TypedDict
-`{used, cap}`. A TypedDict rather than a dataclass because it is a plain dict:
-it serializes into checkpoints and shows in Studio like everything else. It is
-reduced by `merge_budgets`, which merges per agent *and* per field, so the
-Writer's update cannot erase the Researcher's entry, and a reset can write
-`{"used": 0}` without knowing the cap. `cap` in state is a record for readers;
-enforcement reads the build config.
+Each agent's budget is an `AgentBudget`, a TypedDict `{used, cap}`, in a field
+of its own: `researcher_budget`, `writer_budget`, `critic_budget` (Phase 7
+Part B). A TypedDict rather than a dataclass because it is a plain dict: it
+serializes into checkpoints and shows in Studio like everything else. `cap` in
+state is a record for readers; enforcement reads the build config.
+
+Until Part B, all three lived in one shared `budgets` dict under a
+per-agent merge reducer, `merge_budgets`. That design lost updates under
+parallel execution; see "Part B" in the Phase 7 section. The dict is still
+declared, read-only, so threads written before Part B load.
 
 ### Schema migration: reducer-backed keys vs. plain keys
 
@@ -1072,18 +1075,27 @@ declared, and the difference is easy to get backwards by analogy:
 | Declared as | On a thread from before the key existed | Example |
 | --- | --- | --- |
 | plain key (`verdict: str`) | **missing**: `"verdict" not in state` | `state.get("verdict", "")` is correct |
-| reducer-backed (`budgets: Annotated[dict, merge_budgets]`) | **present and empty**: `state["budgets"] == {}` | `"budgets" in state` is `True`, which says nothing |
+| reducer-backed (the legacy `budgets: Annotated[dict, merge_budgets]`, or `messages`) | **present and empty**: `state["budgets"] == {}` | `"budgets" in state` is `True`, which says nothing |
 
 LangGraph gives every reducer channel an empty default, so a presence check
 on a reducer-backed key is always true, and "is this an old thread?" gets the
 wrong answer. The same applies to `messages` and any future `Annotated` key.
 
 **`budget_of(state, agent, default_cap)` is the only sanctioned way to read a
-budget.** It treats absent, empty, and partially-filled entries the same:
-"nothing used, configured cap", which is exactly what an agent that has not
-run this round has spent. Never index `state["budgets"][agent]` directly.
-`tests/test_revisions_and_budgets.py::test_a_pre_6_3_thread_with_no_budgets_resumes_cleanly`
-pins both behaviours.
+budget.** Since Part B it reads, in order:
+1. the agent's own field (`critic_budget`)
+2. the legacy `budgets[agent]`, on threads from 6.3 up to Phase 7 A
+3. "nothing used, configured cap", which is exactly what an agent that has not
+   run this round has spent
+
+That makes it the migration path across three schema versions. It is also why
+the reducer-vs-plain distinction above still matters: the legacy key is
+reducer-backed, so on a pre-6.3 thread it reads as `{}`, not as missing. Never
+index a budget field or `state["budgets"]` directly.
+`tests/test_revisions_and_budgets.py` pins every version:
+`test_a_pre_6_3_thread_with_no_budgets_resumes_cleanly`,
+`test_a_thread_from_before_part_b_resumes_on_the_new_fields`, and
+`test_budget_of_reads_the_legacy_dict_on_an_old_thread`.
 
 A related trap, found in 6.4: **`graph.get_state()` is filtered by the reading
 graph's schema.** Ask the single-agent graph about a multi-agent thread and
@@ -1241,9 +1253,11 @@ Details, per-run reports and the hand reviews are in `docs/live_check/`; start a
 
 ### Open going into Phase 7
 
-**Blocking for any parallel fan-out design:**
+**Blocking for any parallel fan-out design - RESOLVED by Phase 7 Part B:**
 
 - **Budget passthrough from subgraphs is a lost-update bug under concurrency.**
+  *(Resolved: per-agent budget fields. Demonstrated with the real subgraphs
+  in parallel before the fix; see Phase 7 → Part B.)*
   The Researcher and Critic subgraphs read `budgets` and return the *whole*
   dict: their own entry, plus every other agent's entry passed through
   unchanged. Under `merge_budgets` that passthrough is a no-op **only because
@@ -1285,7 +1299,7 @@ Also open:
 | Concept | File |
 | --- | --- |
 | Why one `draft` field breaks with several agents | `multi_agent_state.py` (module docstring) |
-| One field, one owner; `owns`; budget-entry ownership | `multi_agent_state.py` → `OWNERS`, `BUDGET_ENTRY_OWNERS`, `owns` |
+| One field, one owner; `owns` | `multi_agent_state.py` → `OWNERS`, `owns`; the audit in `tests/test_fanout_safety.py` |
 | The turn boundary as a node | `multi_agent_graph.py` → `begin_turn`, `per_turn_reset`, `multi_agent_turn_input` |
 | `input_schema` / `output_schema` as an agent's contract | `multi_agent_state.py` → `ResearcherInput/Output`, `CriticInput/Output` |
 | An agent as a subgraph; private channels and their limits | `agents/researcher.py`, `agents/critic.py` (module docstrings) |
@@ -1299,7 +1313,7 @@ Also open:
 | Staleness (draft, rejection, critique) | `agents/supervisor.py` → `draft_is_current`, `draft_was_rejected`, `critique_is_current` |
 | Decision in a node, edge in a routing function | `multi_agent_graph.py` → `route_from_supervisor` |
 | Rejections through the Supervisor; the cap overrules the verdict | `multi_agent_graph.py` → `after_critique`, `after_review`, `start_revision` |
-| Budget TypedDict, reducer, safe access | `multi_agent_state.py` → `AgentBudget`, `merge_budgets`, `budget_of` |
+| Budget TypedDict, per-agent fields, safe access | `multi_agent_state.py` → `AgentBudget`, `BUDGET_FIELDS`, `budget_of` (and "why budgets became three fields") |
 | Counter scopes | `multi_agent_state.py` → `dispatches`; `multi_agent_graph.py` (bottom) |
 | Why the decision log does not use `operator.add` | `multi_agent_state.py` → `supervisor_log` |
 | A human edit as its own field | `multi_agent_state.py` → `human_edit` |
@@ -1381,6 +1395,18 @@ The unsupported citation reached the user anyway. The information existed;
 it just never reached the component that could act on it. A check that
 nobody downstream acts on turns silent bad output into *logged* bad output.
 That is better, but it is not a fix.
+
+Part B tested that diagnosis instead of assuming it, with a control:
+
+| Scenario | Draft | Writer's flag shown? | Critic |
+| --- | --- | --- | --- |
+| CRT07 / CRT08 | short, 2 citations | yes / **no** | rejects / **rejects** |
+| CRT09 / CRT10 | E2E01's real answer, 13 citations | yes / **no** | rejects, naming it / **approves** |
+
+In a short draft the Critic catches the unresearched citation unaided. Among
+thirteen it does not - CRT10 reproduces E2E01's miss exactly - and with the
+flag it does. So the gap was real, and it only bites at scale, which is where
+the offline tests and the small scenarios could not see it.
 
 The lesson for a multi-agent graph: for every piece of information one agent
 produces, ask **which agent must act on it, and whether that agent actually
@@ -1467,3 +1493,46 @@ Still open, carried forward:
   tokens in v6), they are the largest in the run, and the failed run's
   22.5k tokens spent match its 5th-6th call. Any future oversize request
   will be named directly.
+
+### Part B: state that survives parallel agents
+
+**The bug.** Budgets lived in one shared dict. The Researcher and Critic
+subgraphs read it and returned all of it: their own entry, plus every other
+agent's entry passed through unchanged, because a subgraph's output schema
+works per key, not per entry. That was harmless one node at a time. With two
+branches in parallel it is a lost update. Demonstrated with the real
+subgraphs before the fix: the Researcher and Critic in parallel, and the
+Critic's spend came back as 1 instead of 2, with no error raised.
+
+**The fix.** One field per agent: `researcher_budget`, `writer_budget`,
+`critic_budget`. Each has one owner, and each subgraph's schema carries only
+its own, so there is nothing to pass through.
+- **Why not a delta reducer:** it would make the passthrough *add* the other
+  agents' unchanged entries instead of doing nothing.
+- **Why not a smarter merge:** a merge cannot tell a passthrough copy from a
+  real update.
+
+It is also simpler than what it replaced: the entry-level ownership check in
+`owns()` is gone, because ordinary per-field ownership covers it.
+
+**Migration.** The legacy `budgets` stays declared, read-only, so older
+threads load. `budget_of` reads the new field, then the legacy dict, then
+defaults. There are tests for threads from before 6.3, from 6.3 to Phase 7 A,
+and after Part B.
+
+**Proof, in `tests/test_fanout_safety.py`:**
+- the old pattern loses an update in a real parallel graph (kept as the
+  *reason*)
+- the real Researcher and Critic in parallel keep both budgets and both
+  outputs
+- an audit: every field written by more than one node has a documented reason
+  (the turn and round resets; `messages`' prune-then-append), and no two
+  agents share any field
+
+The graph still runs one agent at a time. Part B makes the state safe for the
+day it doesn't.
+
+**Also in Part B - the coordination gap from E2E01.** The Critic now receives
+the Writer's `unsupported_citations` as a fact, with a rule to reject on
+them. Evidence: see the table in "A different failure: the coordination
+gap" above.

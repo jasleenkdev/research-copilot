@@ -1,0 +1,14 @@
+- Findings: Retrieval Augmented Generation Evaluation in the Era of Large Language Models: A Comprehensive Survey (http://arxiv.org/abs/2504.14891v1)
+- Findings: Evaluation of Retrieval‑Augmented Generation: A Survey (http://arxiv.org/abs/2405.07437v2)
+- Findings: MIRAGE: A Metric‑Intensive Benchmark for Retrieval‑Augmented Generation Evaluation (http://arxiv.org/abs/2504.17137v1)
+- Findings: Evaluating Retrieval Quality in Retrieval‑Augmented Generation (http://arxiv.org/abs/2404.13781v1)
+- Findings: Investigating the Robustness of Retrieval‑Augmented Generation at the Query Level (http://arxiv.org/abs/2507.06956v1)
+- Findings: Ragas: Automated Evaluation of Retrieval Augmented Generation (http://arxiv.org/abs/2309.15217v2)
+- Findings: The Personalization Paradox: Semantic Loss vs. Reasoning Gains in Agentic AI Q&A (http://arxiv.org/abs/2512.04343v1)
+- Findings: Seeing Through the MiRAGE: Evaluating Multimodal Retrieval Augmented Generation (http://arxiv.org/abs/2510.24870v3)
+- Findings: VERA: Validation and Evaluation of Retrieval‑Augmented Systems (http://arxiv.org/abs/2409.03759v1)
+- Findings: DeepCodeSeek: Real‑Time API Retrieval for Context‑Aware Code Generation (http://arxiv.org/abs/2509.25716v1)
+- Findings: ragR: Retrieval‑Augmented Generation and RAG Assessment in R (http://arxiv.org/abs/2604.23515v1)
+- Findings: Utilizing Metadata for Better Retrieval‑Augmented Generation (http://arxiv.org/abs/2601.11863v1)
+- Sources: as listed with each finding above.
+- Gaps: no head-to-head comparison of the metrics against human judgement across benchmarks.

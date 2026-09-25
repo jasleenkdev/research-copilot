@@ -253,13 +253,16 @@ def _run_critic(s: Scenario, cfg):
         tools = [cfg.verify_tool or verify_citation]
 
     critic = build_critic(model=_model(cfg), tools=tools)
-    out = critic.invoke({"question": sc.QUESTION, "draft": s.inputs["draft"], "research_notes": sc.NOTES,
+    out = critic.invoke({"question": s.inputs.get("question", sc.QUESTION), "draft": s.inputs["draft"],
+                         "research_notes": s.inputs.get("research_notes", sc.NOTES),
                          "unsupported_citations": s.inputs.get("unsupported_citations", [])})
     checks_by_id = {c["arxiv_id"]: c["status"] for c in out.get("citation_checks", [])}
     checks = {"verdict": out.get("verdict") == s.expect["verdict"],
               "used_verify_citation": bool(out.get("citation_checks"))}
     for arxiv_id in s.expect.get("found", []):
         checks[f"{arxiv_id}_found"] = any(arxiv_id in k and v == "found" for k, v in checks_by_id.items())
+    for arxiv_id in s.expect.get("must_name", []):
+        checks[f"critique_names_{arxiv_id}"] = arxiv_id in (out.get("critique") or "")
     for arxiv_id in s.expect.get("not_found", []):
         checks[f"{arxiv_id}_rejected_by_lookup"] = any(
             arxiv_id in k and v in ("not_found", "invalid") for k, v in checks_by_id.items()
