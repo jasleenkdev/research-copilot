@@ -1378,7 +1378,14 @@ prompts:
 | `tool_choice="none"` means no tool call | the reserved final call, first version | gpt-oss called the tool anyway |
 | a provider counts `max_tokens` against its limits | my headroom probe | Groq: the probe passed with ~1k free |
 | a request cannot outgrow the provider's ceiling | every agent, since Phase 6 | a 413 at 8,849 tokens |
-| 2 SDK retries cover per-minute 429s | the Part D ownership table (row A) | Part C's live streamed run: the SDK needed 10 retries over the run, and one call outlasted 2 |
+| 2 SDK retries cover per-minute 429s | the Part D ownership table (row A) | the retry count needed calibrating against real per-minute pressure a live run surfaced: in Part C's streamed run one call outlasted 2, and 6 completed the run after 10 retries in all |
+
+That last row is a calibration, not a reversal. Part D's reasoning was about
+the daily-limit case, where every retry is guaranteed to fail, and it still
+holds: the transport keeps those 429s away from the SDK entirely. What Part D
+had no evidence about yet was per-minute pressure across a real multi-call
+run. With daily limits routed around it, a higher count costs nothing against
+the problem Part D solved, so the default is back to 6.
 
 ### A different failure: the coordination gap
 
@@ -1420,6 +1427,33 @@ which assumes something about why a call failed. **Part E**'s evaluators will
 encode what "correct" means. A wrong evaluator does not fail loudly: it scores
 confidently. Both need checking against real behaviour, the way this guard
 finally was.
+
+### A standing rule: every new way of observing the graph leaks until tested
+
+One belief has now been falsified three times: that private-channel state
+(the Researcher's `research_messages`) stays private when the graph is
+observed a new way.
+
+| Mechanism | What was believed | What a test found |
+| --- | --- | --- |
+| `updates` / `values` stream modes (6.1) | private writes appear | they are hidden |
+| `tasks` stream mode (6.1) | hidden, like `updates` | visible in inner steps |
+| `astream_events` (Part C) | hidden, like the stream modes | visible, even in the parent-level node's end event |
+
+Each was reasoned about by analogy to the one before, and each analogy was
+wrong. This is a structural property of the codebase now, not a gotcha: the
+privacy of a channel is a property of the *observer*, not of the state
+schema. So:
+
+> **Any new way of observing the graph - a stream mode, an event API, a
+> tracer, a Studio view, an evaluator's input, an API endpoint - is assumed
+> capable of leaking private-channel content until a test proves otherwise.
+> It is never assumed safe by analogy to a mechanism already verified.**
+
+In practice: whatever leaves the process goes through an allow-list
+(`streaming.astream_run` for events, state fields named one by one for
+evaluators), and each new observer gets its own leak test, the way
+`tests/test_streaming.py` has one for events.
 
 ## Lesson: a fallback must never be broad enough to swallow our own bugs
 
@@ -1593,7 +1627,7 @@ redacted). Nothing handles a failure that has not been observed.
 
 | Row | Failure (real body) | Owner | Action | Before Part D |
 | --- | --- | --- | --- | --- |
-| A | 429 per minute, retry-after ~13 s | **provider SDK** | its own 2 retries, honouring retry-after; now *counted* in live runs | 6 retries, uncounted |
+| A | 429 per minute, retry-after ~13 s | **provider SDK** | its own retries, honouring retry-after; now *counted* in live runs (2 in Part D, calibrated to 6 in Part C) | 6 retries, uncounted |
 | B | 429 **daily** limit, retry-after in minutes or hours | **call level** | fallback model if configured, else `QuotaExhausted`, which stops the run | the SDK sent **7 requests in 21 s**, every one bound to fail, then crashed |
 | C | 413 request too large | call level | the request-size limit prevents it; one retry at 70% | same (Part A) |
 | D | 400 invented tool | call level | one retry with a hint | same (Part A) |
@@ -1688,7 +1722,7 @@ Consequences built into the design:
   the transport - had to be checked live. It was: a full run with the Critic
   on Groq, streamed end to end.
 
-Open from Part C: the SDK's retry count. It is configurable
-(`RESEARCH_COPILOT_SDK_MAX_RETRIES`) and defaults to 2, the Part D decision.
-Live evidence says 2 is too few on Groq's free tier: with 2 a run died, with 6
-it completed after 10 retries.
+The SDK's retry count, calibrated here: with 2 a live streamed run died on a
+per-minute 429, and with 6 it completed after 10 retries in all. The default
+is now 6 (`RESEARCH_COPILOT_SDK_MAX_RETRIES` overrides it); see the
+falsified-assumptions table for why that does not undo Part D.

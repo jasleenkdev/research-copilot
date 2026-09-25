@@ -139,7 +139,7 @@ def test_before_part_d_the_sdk_sent_seven_requests_for_one_daily_limit_call():
 
 @pytest.mark.parametrize("name, requests", [
     ("groq_429_tokens_per_day", 1),      # row B: the SDK no longer touches it
-    ("groq_429_tokens_per_minute", 3),   # row A: the SDK's own 2 retries, kept
+    ("groq_429_tokens_per_minute", 7),   # row A: the SDK's own 6 retries (calibrated in Part C)
     ("groq_413_request_too_large", 1),   # row C: never an SDK retry
     ("groq_400_invented_tool", 1),       # row D
     ("groq_404_model_not_found", 1),     # row F
@@ -164,7 +164,7 @@ def test_sdk_retries_are_counted_for_row_a():
     with _SdkRetryCounter() as counter:
         with pytest.raises(Exception):
             groq_model("groq_429_tokens_per_minute", []).invoke("hi")
-    assert counter.count == 2
+    assert counter.count == 6
 
 
 # --- the call level: fallback, or a clean stop ------------------------------------------------------
@@ -294,13 +294,16 @@ def test_fallback_model_is_configured_as_provider_colon_model(monkeypatch):
         get_fallback_model()
 
 
-def test_sdk_retry_count_is_configurable_and_defaults_to_two(monkeypatch):
+def test_sdk_retry_count_defaults_to_six_and_is_configurable(monkeypatch):
     """Part C, live: 2 retries were not always enough for per-minute 429s under
-    a real streamed run (the SDK needed 10 over one run). The default stays 2
-    until decided; RESEARCH_COPILOT_SDK_MAX_RETRIES overrides it."""
+    a real streamed run (the SDK needed 10 over one run), so the default is 6.
+    Safe only because daily-limit 429s never reach the SDK's retry logic -
+    pinned by the transport tests above. RESEARCH_COPILOT_SDK_MAX_RETRIES
+    overrides it."""
+    assert get_chat_model().max_retries == 6
+    monkeypatch.setenv("RESEARCH_COPILOT_SDK_MAX_RETRIES", "2")
     assert get_chat_model().max_retries == 2
     monkeypatch.setenv("RESEARCH_COPILOT_SDK_MAX_RETRIES", "6")
-    assert get_chat_model().max_retries == 6
     calls: list = []
     with pytest.raises(Exception):
         groq_model("groq_429_tokens_per_minute", calls).invoke("hi")

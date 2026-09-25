@@ -181,15 +181,18 @@ def get_chat_model(
             model=model_name or settings.groq_model,
             max_tokens=max_tokens or _GROQ_DEFAULT_MAX_TOKENS,
             # Part D: the SDK owns per-minute 429s (row A of the ownership
-            # table) and honours their retry-after, which is under 60 s. Its
-            # default of 2 retries is enough. The 6 used during Part A were
-            # never a deliberate choice, and on a *daily*-limit 429 every one
-            # of them was guaranteed to fail (7 requests, 21 s, in the test).
-            # Part C, live: 2 retries were NOT always enough - a streamed run hit
-            # a per-minute 429 (retry-after 0.9 s) that outlasted both. The
-            # count is now configurable (RESEARCH_COPILOT_SDK_MAX_RETRIES) while
-            # the right default is decided on evidence; see the Part C report.
-            max_retries=int(os.getenv("RESEARCH_COPILOT_SDK_MAX_RETRIES") or 2),
+            # table) and honours their retry-after, which is under 60 s. On a
+            # *daily*-limit 429 every SDK retry is guaranteed to fail (7
+            # requests, 21 s, in the test), which is why Part D cut the count to
+            # 2 - and why the transport below now keeps those 429s away from
+            # the SDK entirely.
+            # Part C calibrated the count against real per-minute pressure: in a
+            # live streamed run 2 were not enough (a 429 with retry-after 0.9 s
+            # outlasted both), and 6 completed the run after 10 retries in all.
+            # With daily limits routed around the SDK, extra retries only ever
+            # spend seconds on waits that succeed. Override with
+            # RESEARCH_COPILOT_SDK_MAX_RETRIES.
+            max_retries=int(os.getenv("RESEARCH_COPILOT_SDK_MAX_RETRIES") or 6),
             # ...and the transport stops the SDK retrying daily-limit 429s at
             # all: those belong to the call level (resilience.py).
             http_client=httpx.Client(transport=QuotaAwareTransport()),
