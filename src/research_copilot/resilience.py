@@ -52,6 +52,36 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 log = logging.getLogger(__name__)
 
 
+INTERVENTION_EVENT = "intervention"
+
+
+def emit_intervention(record: dict) -> None:
+    """Announce an intervention the moment it happens, as a custom stream event.
+    (Phase 7 Part C)
+
+    Interventions happen *inside* a node - a retry, a fallback, a trim - and a
+    node's state update is only visible when the node finishes. Without this, a
+    live stream would show less than the final state does: "the Critic is
+    retrying with a hint" would only appear after the Critic had finished. So
+    each one is also dispatched as a custom event (`on_custom_event`, name
+    "intervention"), which `astream_events` delivers immediately, from inside
+    sync nodes and subgraphs alike (measured in Part C). streaming.py turns it
+    into a normalised event. The state write still happens, as before - the
+    event is in addition to it, not instead of it.
+
+    Outside any graph run there is no stream to announce to, and LangChain
+    raises one specific RuntimeError. That, and only that, is ignored - see the
+    README's lesson on handlers broad enough to swallow our own bugs.
+    """
+    from langchain_core.callbacks.manager import dispatch_custom_event
+
+    try:
+        dispatch_custom_event(INTERVENTION_EVENT, dict(record))
+    except RuntimeError as exc:
+        if "without a parent run id" not in str(exc):
+            raise
+
+
 @dataclass
 class ModelCallFailure:
     """A model call that did not produce a usable message, even after recovery."""
@@ -170,7 +200,13 @@ def invoke_with_recovery(
 
     Returns (message or failure, attempts made).
     """
-    record = on_intervention or (lambda _: None)
+    node = where.split(" ")[0]
+
+    def record(entry: dict) -> None:
+        # Part C: announce it live, then hand it to the agent for its state field.
+        emit_intervention({"node": node, **entry})
+        if on_intervention is not None:
+            on_intervention(entry)
 
     def quota(exc: BaseException, attempts: int):
         resolved = fallback() if fallback is not None else None

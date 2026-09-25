@@ -292,3 +292,16 @@ def test_fallback_model_is_configured_as_provider_colon_model(monkeypatch):
     monkeypatch.setenv("RESEARCH_COPILOT_FALLBACK_MODEL", "gpt-oss-20b")
     with pytest.raises(RuntimeError, match="provider:model"):
         get_fallback_model()
+
+
+def test_sdk_retry_count_is_configurable_and_defaults_to_two(monkeypatch):
+    """Part C, live: 2 retries were not always enough for per-minute 429s under
+    a real streamed run (the SDK needed 10 over one run). The default stays 2
+    until decided; RESEARCH_COPILOT_SDK_MAX_RETRIES overrides it."""
+    assert get_chat_model().max_retries == 2
+    monkeypatch.setenv("RESEARCH_COPILOT_SDK_MAX_RETRIES", "6")
+    assert get_chat_model().max_retries == 6
+    calls: list = []
+    with pytest.raises(Exception):
+        groq_model("groq_429_tokens_per_minute", calls).invoke("hi")
+    assert len(calls) == 7

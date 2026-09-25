@@ -990,6 +990,7 @@ def cmd_multi_agent(
     approve: bool = False,
     memory_strategy: str | None = None,
     max_history_tokens: int | None = None,
+    live: bool = False,
 ) -> None:
     """One turn of the multi-agent graph, optionally on a persistent thread.
 
@@ -1066,6 +1067,12 @@ def cmd_multi_agent(
                 return
 
         _announce_policy(policy)
+        if live:
+            # Part C: the normalised event stream (streaming.py) - the same one
+            # Part F's API will serve. The answer streams to stdout as it is
+            # written; everything else goes to stderr as it happens.
+            _print_live(graph, multi_agent_turn_input(question, mode, policy=policy), config, thread)
+            return
         state, pending = _stream_multi_agent(
             graph, multi_agent_turn_input(question, mode, policy=policy), config
         )
@@ -1076,6 +1083,62 @@ def cmd_multi_agent(
             return
         print(final_answer(state))
         _print_multi_agent_state(state)
+
+
+def _print_live(graph, graph_input, config, thread_id: str) -> None:
+    """Render streaming.astream_run's events for a terminal. (Part C)"""
+    import asyncio
+
+    from research_copilot.request_budget import describe_intervention
+    from research_copilot.streaming import astream_run
+
+    from research_copilot.live_check.runner import _SdkRetryCounter
+
+    async def run():
+        in_answer = False
+        async for e in astream_run(graph, graph_input, config):
+            kind = e["type"]
+            if kind == "token":
+                in_answer = True
+                sys.stdout.write(e["text"])
+                sys.stdout.flush()
+                continue
+            if in_answer:
+                sys.stdout.write("\n")
+                in_answer = False
+            if kind == "decision":
+                line = f"[decision] -> {e['routed_to']}"
+                if e["override"]:
+                    line += f"  (proposed {e['proposed'] or 'nothing usable'}; OVERRIDDEN: {e['override']})"
+                print(line + f"\n    why: {' '.join(e['rationale'].split())[:160]}", file=sys.stderr)
+            elif kind == "verdict":
+                print(f"[critic] {e['verdict'].upper()}  {' '.join(e['critique'].split())[:160]}", file=sys.stderr)
+            elif kind == "intervention":
+                print(f"[intervention] {describe_intervention(e)}", file=sys.stderr)
+            elif kind == "tool" and e["phase"] == "start":
+                print(f"    [{e['agent']}] {e['name']}({e.get('arg', '')})", file=sys.stderr)
+            elif kind == "node" and e["phase"] == "start" and e["depth"] == 0 and e["node"] in (
+                "researcher", "writer", "critic"
+            ):
+                print(f"  [{e['node']}] working...", file=sys.stderr)
+            elif kind == "paused":
+                _print_multi_agent_pending(e["payload"], thread_id)
+            elif kind == "stopped":
+                print(f"error: the run was stopped ({e['reason']}).\n  {e['detail']}", file=sys.stderr)
+            elif kind == "done":
+                print(f"[done] dispatches={e['dispatches']} revisions={e['revisions']} "
+                      f"interventions={e['interventions']}", file=sys.stderr)
+            elif kind == "error":
+                # Reported, then re-raised by astream_run: the traceback that
+                # follows is deliberate (our own bugs stay loud).
+                print(f"[error] {e['kind']}: {e['detail']}", file=sys.stderr)
+
+    # Part D row A, made visible live: the provider SDK's own retries.
+    with _SdkRetryCounter() as retries:
+        try:
+            asyncio.run(run())
+        finally:
+            print(f"[sdk] provider SDK retried {retries.count} time(s) on its own", file=sys.stderr)
 
 
 def _announce_policy(policy: dict) -> None:
@@ -1777,6 +1840,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Continue an existing multi-agent conversation (the id is printed on each run)",
     )
     multi_parser.add_argument(
+        "--live",
+        action="store_true",
+        help=(
+            "Stream the run as it happens (Part C): the answer token by token, and "
+            "each decision, verdict, tool call and intervention as it occurs"
+        ),
+    )
+    multi_parser.add_argument(
         "--critic",
         action="store_true",
         help=(
@@ -1879,6 +1950,7 @@ def main(argv: list[str] | None = None) -> int:
                 approve=args.approve,
                 memory_strategy=args.memory_strategy,
                 max_history_tokens=args.max_history_tokens,
+                live=args.live,
             )
         elif args.command == "live-check":
             cmd_live_check(

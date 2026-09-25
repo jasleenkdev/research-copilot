@@ -127,8 +127,17 @@ def fit_text(text: str, available_tokens: int) -> tuple[str, int, int]:
 
 
 def trim_record(node: str, part: str, before: int, after: int, limit: int) -> Intervention:
-    return {"node": node, "kind": "trim", "part": part, "tokens_before": before,
-            "tokens_after": after, "limit": limit}
+    """A trim, recorded - and announced live (Part C; see resilience.emit_intervention).
+
+    Every trim is built here and only here, at the moment the cut is made, so
+    this is the one place the live announcement has to happen.
+    """
+    from research_copilot.resilience import emit_intervention
+
+    record: Intervention = {"node": node, "kind": "trim", "part": part, "tokens_before": before,
+                            "tokens_after": after, "limit": limit}
+    emit_intervention(record)
+    return record
 
 
 def describe_intervention(i: dict) -> str:

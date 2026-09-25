@@ -1378,21 +1378,7 @@ prompts:
 | `tool_choice="none"` means no tool call | the reserved final call, first version | gpt-oss called the tool anyway |
 | a provider counts `max_tokens` against its limits | my headroom probe | Groq: the probe passed with ~1k free |
 | a request cannot outgrow the provider's ceiling | every agent, since Phase 6 | a 413 at 8,849 tokens |
-
-### Error handling that hides our own bugs
-
-Part D found a quieter relative of the guard problem. The Supervisor's
-`except Exception` existed for one purpose: an unusable *model* reply falls
-back to `fixed_policy`. But it also wrapped the Supervisor's own view-building
-code. When Part D changed a data shape, the view raised `KeyError`, the
-handler caught it, and the run silently routed on `fixed_policy`. The log
-recorded "fallback to fixed policy", indistinguishable from a model failure.
-The same pattern turned a crash inside the new HTTP transport into what the
-SDK treated as a connection error, which it retried.
-
-**A fallback handler should wrap only the thing it is a fallback for.** Our
-own code outside it must fail loudly, because a bug handled as a model
-failure is a bug nobody will look for.
+| 2 SDK retries cover per-minute 429s | the Part D ownership table (row A) | Part C's live streamed run: the SDK needed 10 retries over the run, and one call outlasted 2 |
 
 ### A different failure: the coordination gap
 
@@ -1434,6 +1420,51 @@ which assumes something about why a call failed. **Part E**'s evaluators will
 encode what "correct" means. A wrong evaluator does not fail loudly: it scores
 confidently. Both need checking against real behaviour, the way this guard
 finally was.
+
+## Lesson: a fallback must never be broad enough to swallow our own bugs
+
+**The principle:** every fallback, catch-all and "degrade gracefully" path
+must be exactly as wide as the failure it exists for, and no wider. If it
+also catches bugs in our own code, our own mistakes become
+indistinguishable from legitimate degraded-mode behaviour. They are logged,
+routed and reported as if the model or the provider had failed, and nobody
+goes looking for them.
+
+Part D found it twice in one step:
+
+- **The Supervisor's catch-all.** Its `except Exception` existed for one
+  thing: an unusable *model* reply falls back to `fixed_policy`. But it also
+  wrapped the Supervisor's own view-building code. When Part D changed a
+  data shape, the view raised `KeyError`. The handler caught it, the run
+  silently routed on `fixed_policy`, and the log said "fallback to fixed
+  policy", word for word what a model failure produces. The fix narrows the
+  handler to the model call alone. Our code outside it now fails loudly.
+- **The SDK's retry handler.** The first version of the quota-aware HTTP
+  transport crashed on its own bug. The provider SDK classified that crash as
+  a connection error and retried it: a bug in *our* code, absorbed by *their*
+  resilience layer, and silently recreating the exact waste the transport was
+  built to remove.
+
+The same failure shape, "no error, and it silently did not do what was
+intended", turned up everywhere else this project looked:
+- the 6.3 guard that forced a rewrite of a draft nobody faulted
+- the `updates` stream mode hiding a subgraph's private writes (6.1)
+- a provider not counting `max_tokens` against its limits (Part A)
+- a test suite reaching the network through a leaked environment variable (Part D)
+- text edits that matched nothing and reported success (Part D)
+
+The structural answer is the same each time:
+- **Make the mismatch loud.** Fixture tests that fail, edits that assert
+  their target exists, handlers that re-raise what is not theirs.
+- **Never trust silence as evidence that something worked.**
+
+Checklist for any new `except`:
+1. **Which failure is this for?** Name it, and catch only that: a specific
+   exception class, a classified kind, or a wrapped call.
+2. **What else could raise inside the `try`?** Anything that is our own code
+   goes outside it.
+3. **Would a bug here look different, in the log, from the failure this
+   handles?** If not, the handler is too wide.
 
 ## Phase 7: Production (in progress)
 
@@ -1611,3 +1642,53 @@ the report.
 - LangGraph's node-level `RetryPolicy`. Around a subgraph it would re-run
   the whole Researcher loop on top of the SDK's retries.
 - Any handling for the unobserved rows G and H.
+
+### Part C: watching a run as it happens
+
+`streaming.astream_run(graph, graph_input, config)` is an async generator of
+normalised progress events, built on LangChain's `astream_events(version="v2")`:
+
+| Event | Carries |
+| --- | --- |
+| `node` | start or end, agent, node, depth (inner subgraph steps at depth 1) |
+| `decision` | the Supervisor's proposal, route, override and rationale |
+| `verdict` | the Critic's verdict, critique and citation checks |
+| `intervention` | a trim, hinted retry, too-large retry or fallback, **when it happens** |
+| `token` | a piece of the Writer's answer (other agents' tokens are opt-in) |
+| `tool` | a tool call, with only its identifying argument (query or arXiv id) |
+| `paused` / `done` | parked at the human gate / finished, with the answer and counters |
+| `stopped` | spent quota or missing model: one clean event, no exception |
+| `error` | anything else - reported, then **re-raised** |
+
+`research-copilot multi-agent "..." --live` renders it: the answer streams to
+stdout, and everything else goes to stderr as it happens.
+
+What was measured, not assumed (the third correction to the 6.1 finding):
+
+| | `updates`/`values` | `tasks` | `astream_events` |
+| --- | --- | --- | --- |
+| Researcher's private `research_messages` | hidden | inner steps only | **visible, including in the parent-level `researcher` end event** |
+| tokens | - | - | yes, from **every** agent's call, because `.invoke()` inside a node switches to streaming under `astream_events` |
+| custom events from inside a sync node or subgraph tool | - | - | delivered |
+
+Consequences built into the design:
+- **Allow-list, never pass-through.** Every event is built from named fields.
+  Raw `astream_events` would hand a client the Researcher's tool traffic and
+  the Critic's raw lookups. A test asserts none of them appear.
+- **Interventions are custom events as well as state writes**
+  (`resilience.emit_intervention`). They arrive *inside* the node, so the
+  stream never shows less than the final state.
+- **Two endings.** `stopped` for expected provider-side conditions. `error`
+  then re-raise for everything else, so a streaming layer does not tidy our
+  bugs away (see the lesson on over-broad fallbacks).
+- **No helper to remember.** A stream started with bare input still resets
+  per turn, because `begin_turn` is in the graph (tested).
+- **Every model call streams under `astream_events`.** So the streamed code
+  path - tool calls arriving in chunks, the Supervisor's structured output,
+  the transport - had to be checked live. It was: a full run with the Critic
+  on Groq, streamed end to end.
+
+Open from Part C: the SDK's retry count. It is configurable
+(`RESEARCH_COPILOT_SDK_MAX_RETRIES`) and defaults to 2, the Part D decision.
+Live evidence says 2 is too few on Groq's free tier: with 2 a run died, with 6
+it completed after 10 retries.

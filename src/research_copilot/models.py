@@ -146,6 +146,9 @@ class AsyncQuotaAwareTransport:
         await self._inner.aclose()
 
 
+import os
+
+
 def get_chat_model(
     *,
     max_tokens: int | None = None,
@@ -182,7 +185,11 @@ def get_chat_model(
             # default of 2 retries is enough. The 6 used during Part A were
             # never a deliberate choice, and on a *daily*-limit 429 every one
             # of them was guaranteed to fail (7 requests, 21 s, in the test).
-            max_retries=2,
+            # Part C, live: 2 retries were NOT always enough - a streamed run hit
+            # a per-minute 429 (retry-after 0.9 s) that outlasted both. The
+            # count is now configurable (RESEARCH_COPILOT_SDK_MAX_RETRIES) while
+            # the right default is decided on evidence; see the Part C report.
+            max_retries=int(os.getenv("RESEARCH_COPILOT_SDK_MAX_RETRIES") or 2),
             # ...and the transport stops the SDK retrying daily-limit 429s at
             # all: those belong to the call level (resilience.py).
             http_client=httpx.Client(transport=QuotaAwareTransport()),
