@@ -18,3 +18,8 @@ data/
 
 # LangGraph dev server (langgraph dev) local state
 .langgraph_api/
+!README.md
+*.md
+CLAUDE.md
+ARCHITECTURE.md
+index.md
