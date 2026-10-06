@@ -1,0 +1,31 @@
+# Render Blueprint: the API (research_copilot.api) as a web service.
+# Dashboard -> New -> Blueprint -> pick this repo. Render asks for the
+# `sync: false` values (your keys) during setup; they never live in git.
+services:
+  - type: web
+    name: research-copilot-api
+    runtime: python
+    plan: free
+    # CPU-only torch first: the default wheel pulls ~2 GB of CUDA libraries the
+    # free plan neither needs nor has room for. torch is only imported for
+    # knowledge-base mode; live (arXiv) runs never load it.
+    buildCommand: pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install -e ".[api,groq]"
+    startCommand: uvicorn research_copilot.api:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: RESEARCH_COPILOT_PROVIDER
+        value: groq                      # free tier; set to anthropic with ANTHROPIC_API_KEY
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: RESEARCH_COPILOT_CHECKPOINTER
+        value: sqlite                    # free-plan disk is wiped on redeploy and idle spin-down
+      - key: RESEARCH_COPILOT_MEMORY_STRATEGY
+        value: trim
+      - key: LANGSMITH_TRACING
+        value: "false"
+      - key: RESEARCH_COPILOT_CORS_ORIGINS
+        sync: false                      # your Vercel URL, e.g. https://research-copilot.vercel.app

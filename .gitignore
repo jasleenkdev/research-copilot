@@ -23,3 +23,8 @@ data/
 CLAUDE.md
 ARCHITECTURE.md
 index.md
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/dist-preview/

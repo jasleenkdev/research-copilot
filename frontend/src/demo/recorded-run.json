@@ -1,0 +1,3891 @@
+[
+ {
+  "type": "thread",
+  "thread_id": "4626acc7-5cc4-436c-bfe7-8b411bacef1d",
+  "is_new": true,
+  "policy": {
+   "routing": "supervisor",
+   "enable_critic": true,
+   "require_approval": false,
+   "max_revisions": 2,
+   "max_research_iterations": 5,
+   "enable_planning": false
+  }
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "begin_turn",
+  "node": "begin_turn",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "begin_turn",
+  "node": "begin_turn",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "prune_history",
+  "node": "prune_history",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "prune_history",
+  "node": "prune_history",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "plan_question",
+  "node": "plan_question",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "plan_question",
+  "node": "plan_question",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "supervisor",
+  "node": "supervisor",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "supervisor",
+  "node": "supervisor",
+  "depth": 0
+ },
+ {
+  "type": "decision",
+  "step": 1,
+  "proposed": "researcher",
+  "routed_to": "researcher",
+  "override": "",
+  "rationale": "No research notes yet; the question needs evidence on evaluation frameworks before anything can be written.",
+  "brief": ""
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "researcher",
+  "node": "researcher",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "researcher",
+  "node": "research_model",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "researcher",
+  "node": "research_model",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "researcher",
+  "node": "research_tools",
+  "depth": 1
+ },
+ {
+  "type": "tool",
+  "phase": "start",
+  "agent": "researcher",
+  "name": "search_arxiv",
+  "arg": "RAG evaluation framework"
+ },
+ {
+  "type": "tool",
+  "phase": "end",
+  "agent": "researcher",
+  "name": "search_arxiv"
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "researcher",
+  "node": "research_tools",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "researcher",
+  "node": "research_model",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "researcher",
+  "node": "research_model",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "researcher",
+  "node": "research_tools",
+  "depth": 1
+ },
+ {
+  "type": "tool",
+  "phase": "start",
+  "agent": "researcher",
+  "name": "search_arxiv",
+  "arg": "automated evaluation retrieval augmented generation judges"
+ },
+ {
+  "type": "tool",
+  "phase": "end",
+  "agent": "researcher",
+  "name": "search_arxiv"
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "researcher",
+  "node": "research_tools",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "researcher",
+  "node": "research_model",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "researcher",
+  "node": "research_model",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "researcher",
+  "node": "compile_notes",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "researcher",
+  "node": "compile_notes",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "researcher",
+  "node": "researcher",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "supervisor",
+  "node": "supervisor",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "supervisor",
+  "node": "supervisor",
+  "depth": 0
+ },
+ {
+  "type": "decision",
+  "step": 2,
+  "proposed": "writer",
+  "routed_to": "writer",
+  "override": "",
+  "rationale": "Notes cover two frameworks (RAGAS, ARES) with sources, which is enough to answer the question.",
+  "brief": ""
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "writer",
+  "node": "writer",
+  "depth": 0
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "RAG"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "pipelines"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "are"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "usually"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "evaluated"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "on"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "two"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "halves"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "separately:"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**retrieval**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "(did"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "right"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "context"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "come"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "back?)"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**generation**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "(is"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "answer"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "grounded"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "in"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "that"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "context"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "does"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "it"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "address"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "question?)."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "-"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**RAGAS**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "[2309.15217]"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "scores"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "pipelines"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "without"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "human-written"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "references,"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "along"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "three"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "axes:"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "*faithfulness*"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "(claims"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "supported"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "by"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "retrieved"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "context),"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "*answer"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "relevance*,"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "*context"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "relevance*."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "-"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**ARES**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "[2311.09476]"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "trains"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "small"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "LM"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "judges"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "on"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "synthetic"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "queries"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "uses"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "prediction-powered"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "inference"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "to"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "put"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "confidence"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "intervals"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "on"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "their"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "scores."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "-"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**TruLens**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "[2401.00001]"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "adds"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "a"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\"RAG"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "triad\""
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "dashboard"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "for"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "production"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "monitoring."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "In"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "practice"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "teams"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "combine"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "an"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "automated"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "framework"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "like"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "these"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "with"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "a"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "small"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "human-labelled"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "set"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "to"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "calibrate"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "judges."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "RAG"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "pipelines"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "are"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "usually"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "evaluated"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "on"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "two"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "halves"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "separately:"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**retrieval**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "(did"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "right"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "context"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "come"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "back?)"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**generation**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "(is"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "answer"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "grounded"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "in"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "that"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "context"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "does"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "it"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "address"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "question?)."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "-"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**RAGAS**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "[2309.15217]"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "scores"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "pipelines"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "without"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "human-written"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "references,"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "along"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "three"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "axes:"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "*faithfulness*"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "(claims"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "supported"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "by"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "retrieved"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "context),"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "*answer"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "relevance*,"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "*context"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "relevance*."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "-"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**ARES**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "[2311.09476]"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "trains"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "small"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "LM"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "judges"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "on"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "synthetic"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "queries"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "uses"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "prediction-powered"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "inference"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "to"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "put"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "confidence"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "intervals"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "on"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "their"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "scores."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "-"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**TruLens**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "[2401.00001]"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "adds"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "a"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\"RAG"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "triad\""
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "dashboard"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "for"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "production"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "monitoring."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "In"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "practice"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "teams"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "combine"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "an"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "automated"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "framework"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "like"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "these"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "with"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "a"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "small"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "human-labelled"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "set"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "to"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "calibrate"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "judges."
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "writer",
+  "node": "writer",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "supervisor",
+  "node": "supervisor",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "supervisor",
+  "node": "supervisor",
+  "depth": 0
+ },
+ {
+  "type": "decision",
+  "step": 3,
+  "proposed": "critic",
+  "routed_to": "critic",
+  "override": "",
+  "rationale": "A draft exists and the Critic is on the roster; it should be reviewed before finishing.",
+  "brief": ""
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "critic",
+  "node": "critic",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "critic",
+  "node": "verify_citations",
+  "depth": 1
+ },
+ {
+  "type": "tool",
+  "phase": "start",
+  "agent": "critic",
+  "name": "verify_citation",
+  "arg": "2309.15217"
+ },
+ {
+  "type": "tool",
+  "phase": "end",
+  "agent": "critic",
+  "name": "verify_citation"
+ },
+ {
+  "type": "tool",
+  "phase": "start",
+  "agent": "critic",
+  "name": "verify_citation",
+  "arg": "2311.09476"
+ },
+ {
+  "type": "tool",
+  "phase": "end",
+  "agent": "critic",
+  "name": "verify_citation"
+ },
+ {
+  "type": "tool",
+  "phase": "start",
+  "agent": "critic",
+  "name": "verify_citation",
+  "arg": "2401.00001"
+ },
+ {
+  "type": "tool",
+  "phase": "end",
+  "agent": "critic",
+  "name": "verify_citation"
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "critic",
+  "node": "verify_citations",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "critic",
+  "node": "critic_model",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "critic",
+  "node": "critic_model",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "critic",
+  "node": "compile_verdict",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "critic",
+  "node": "compile_verdict",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "critic",
+  "node": "critic",
+  "depth": 0
+ },
+ {
+  "type": "verdict",
+  "verdict": "reject",
+  "critique": "Writing: cites TruLens (2401.00001), which is not in the research notes - the Writer added it. Remove it or send the Researcher to support it.",
+  "citation_checks": [
+   {
+    "arxiv_id": "2309.15217",
+    "status": "found"
+   },
+   {
+    "arxiv_id": "2311.09476",
+    "status": "found"
+   },
+   {
+    "arxiv_id": "2401.00001",
+    "status": "found"
+   }
+  ]
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "start_revision",
+  "node": "start_revision",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "start_revision",
+  "node": "start_revision",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "supervisor",
+  "node": "supervisor",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "supervisor",
+  "node": "supervisor",
+  "depth": 0
+ },
+ {
+  "type": "decision",
+  "step": 4,
+  "proposed": "writer",
+  "routed_to": "writer",
+  "override": "",
+  "rationale": "The Critic flags TruLens [2401.00001], which is not in the research notes. That is a writing problem: the Writer added a source, so the Writer fixes it.",
+  "brief": ""
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "writer",
+  "node": "writer",
+  "depth": 0
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "RAG"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "pipelines"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "are"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "usually"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "evaluated"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "on"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "two"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "halves"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "separately:"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**retrieval**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "(did"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "right"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "context"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "come"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "back?)"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**generation**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "(is"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "answer"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "grounded"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "in"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "that"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "context"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "does"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "it"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "address"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "question?)."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "-"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**RAGAS**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "[2309.15217]"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "scores"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "pipelines"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "without"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "human-written"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "references,"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "along"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "three"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "axes:"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "*faithfulness*"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "(claims"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "supported"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "by"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "retrieved"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "context),"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "*answer"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "relevance*,"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "*context"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "relevance*."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "-"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "**ARES**"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "[2311.09476]"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "trains"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "small"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "LM"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "judges"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "on"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "synthetic"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "queries"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "uses"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "prediction-powered"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "inference"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "to"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "put"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "confidence"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "intervals"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "on"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "their"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "scores,"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "so"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "a"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "handful"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "of"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "human"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "labels"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "can"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "correct"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "the"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "judges'"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "bias."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "\n"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "The"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "two"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "are"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "complementary"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "rather"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "than"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "competing:"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "RAGAS"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "is"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "quick"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "to"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "run"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "with"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "no"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "training,"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "while"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "ARES"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "costs"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "more"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "setup"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "and"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "gives"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "error"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "bounds."
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "No"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "published"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "head-to-head"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "comparison"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "on"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "one"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "benchmark"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "was"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "found"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "in"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "this"
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": " "
+ },
+ {
+  "type": "token",
+  "agent": "writer",
+  "text": "search."
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "writer",
+  "node": "writer",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "supervisor",
+  "node": "supervisor",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "supervisor",
+  "node": "supervisor",
+  "depth": 0
+ },
+ {
+  "type": "decision",
+  "step": 5,
+  "proposed": "critic",
+  "routed_to": "critic",
+  "override": "",
+  "rationale": "Revised draft drops the unsupported citation; it needs a fresh review.",
+  "brief": ""
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "critic",
+  "node": "critic",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "critic",
+  "node": "verify_citations",
+  "depth": 1
+ },
+ {
+  "type": "tool",
+  "phase": "start",
+  "agent": "critic",
+  "name": "verify_citation",
+  "arg": "2309.15217"
+ },
+ {
+  "type": "tool",
+  "phase": "end",
+  "agent": "critic",
+  "name": "verify_citation"
+ },
+ {
+  "type": "tool",
+  "phase": "start",
+  "agent": "critic",
+  "name": "verify_citation",
+  "arg": "2311.09476"
+ },
+ {
+  "type": "tool",
+  "phase": "end",
+  "agent": "critic",
+  "name": "verify_citation"
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "critic",
+  "node": "verify_citations",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "critic",
+  "node": "critic_model",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "critic",
+  "node": "critic_model",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "critic",
+  "node": "compile_verdict",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "critic",
+  "node": "compile_verdict",
+  "depth": 1
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "critic",
+  "node": "critic",
+  "depth": 0
+ },
+ {
+  "type": "verdict",
+  "verdict": "approve",
+  "critique": "Every claim maps to the notes; both citations verified.",
+  "citation_checks": [
+   {
+    "arxiv_id": "2309.15217",
+    "status": "found"
+   },
+   {
+    "arxiv_id": "2311.09476",
+    "status": "found"
+   }
+  ]
+ },
+ {
+  "type": "node",
+  "phase": "start",
+  "agent": "finalize_answer",
+  "node": "finalize_answer",
+  "depth": 0
+ },
+ {
+  "type": "node",
+  "phase": "end",
+  "agent": "finalize_answer",
+  "node": "finalize_answer",
+  "depth": 0
+ },
+ {
+  "type": "done",
+  "answer": "RAG pipelines are usually evaluated on two halves separately: **retrieval** (did the right context come back?) and **generation** (is the answer grounded in that context and does it address the question?).\n\n- **RAGAS** [2309.15217] scores pipelines without human-written references, along three axes: *faithfulness* (claims supported by the retrieved context), *answer relevance*, and *context relevance*.\n- **ARES** [2311.09476] trains small LM judges on synthetic queries and uses prediction-powered inference to put confidence intervals on their scores, so a handful of human labels can correct the judges' bias.\n\nThe two are complementary rather than competing: RAGAS is quick to run with no training, while ARES costs more setup and gives error bounds. No published head-to-head comparison on one benchmark was found in this search.",
+  "dispatches": {
+   "researcher": 1,
+   "writer": 2,
+   "critic": 2
+  },
+  "revisions": 1,
+  "verdict": "approve",
+  "unsupported_citations": [],
+  "interventions": 0
+ }
+]

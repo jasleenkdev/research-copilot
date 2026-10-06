@@ -1824,3 +1824,92 @@ interval test: **at n=3, even 3/3 against 0/3 overlaps** ([0.44, 1] against
 [0, 0.56]). Three samples are enough to classify one example. They can never
 show that two configurations differ on a single example. That takes pooling
 across examples, or n=5 on the ones that matter (5/5 against 0/5 separates).
+
+### Part F: the HTTP API and the web frontend
+
+Part C's `astream_run` was built for this: `research_copilot/api.py` serves
+the multi-agent graph over HTTP, and `frontend/` is a React + TypeScript +
+Vite app on top of it.
+
+```
+GET    /api/health                provider, model, checkpointer, whether a key is set
+GET    /api/threads               multi-agent threads, newest first, titled by their first question
+GET    /api/threads/{id}          transcript, last turn's work, a pending review
+DELETE /api/threads/{id}          forget a thread: checkpoints, private channels and all
+POST   /api/runs                  start a turn (new or existing thread), streamed as SSE
+POST   /api/threads/{id}/review   approve / reject / edit a parked draft, streamed as SSE
+```
+
+**The stream is `astream_run`'s events and nothing else.** The API adds one
+event of its own, `thread`, sent first so the client learns the thread_id
+before anything else arrives. A second serializer would be a second place for
+a private field to slip through, so there isn't one. `test_api.py` checks the
+stream and the thread view for the Researcher's and Critic's private text.
+
+**The CLI's refusals, as status codes, before any stream starts.** 409 for a
+new turn on a parked thread, a second run on a busy thread, or a review with
+nothing awaiting it. 422 for a single-agent thread. 404 for an unknown one.
+Once streaming has begun, failures are `stopped` / `error` events, because the
+HTTP status has already gone out.
+
+**One async checkpointer per process.** `astream_events` calls the saver's
+async methods, which `SqliteSaver` doesn't implement, so the server opens
+`AsyncSqliteSaver` on the same file the CLI uses. A thread started in the
+terminal can be reviewed in the browser. `none` is upgraded to `memory`:
+threads and the review gate need somewhere to park.
+
+**A review sends only the decision.** The graph is rebuilt from the thread's
+stored `run_policy`, as `multi-review` does, never from the request.
+
+**Retention.** `DELETE /api/threads/{id}` calls `delete_thread`, which also
+removes the subgraph checkpoints holding every search result. This is the
+answer to "private channels are persisted" from *Open going into Phase 7*.
+
+#### Running it locally
+
+```bash
+pip install -e ".[api,groq]"
+uvicorn research_copilot.api:app --reload          # http://127.0.0.1:8000
+
+cd frontend && npm install && npm run dev          # http://localhost:5173 (proxies /api to :8000)
+```
+
+No key? `python scripts/demo_backend.py serve` runs the same API with
+scripted model replies: the real graph and stream, zero tokens. It is also how
+`frontend/src/demo/recorded-run.json` was recorded
+(`python scripts/demo_backend.py record frontend/src/demo/recorded-run.json`).
+When the frontend can't reach an API, it falls back to replaying that file.
+
+Tests: `pytest tests/test_api.py` (offline, fake models) and
+`cd frontend && npm test` (Vitest + React Testing Library).
+
+#### What the frontend shows
+
+- **The route map**: four lanes (Supervisor, Researcher, Writer, Critic), one
+  row per hand-off, with the Supervisor's rationale, any override, each search
+  query, each citation lookup and the Critic's verdict, as they happen.
+- **The answer**, streamed from the Writer's tokens, with every draft kept: a
+  rejected draft stays readable beside the Critic's reason. arXiv ids become
+  links, and each is marked with its lookup result (found / not found / invalid
+  / lookup failed).
+- **The review gate**: approve, send back with a note, or edit the answer
+  yourself (`human_edit`, never the Writer's `draft`).
+- **Conversations**: follow-ups on the same thread, reopening a thread
+  (including one parked for review), and deleting one.
+
+#### Deploying
+
+- **API on Render**: `render.yaml` is a Blueprint (Dashboard -> New ->
+  Blueprint -> this repo). Set `GROQ_API_KEY` (or `ANTHROPIC_API_KEY` with
+  `RESEARCH_COPILOT_PROVIDER=anthropic`), and `RESEARCH_COPILOT_CORS_ORIGINS`
+  to the frontend's URL. It installs CPU-only torch: torch is imported only in
+  knowledge-base mode, and the API sits around 155 MB without it. On the free
+  plan the disk is wiped on redeploy and idle spin-down, so threads don't
+  outlive a restart, and the first request after an idle spell takes ~1 min.
+- **Frontend on Vercel**: import the repo with **Root Directory `frontend`**
+  (`frontend/vercel.json` sets the rest). Set `VITE_API_URL` to the Render
+  URL. You can also point a deployed frontend at any API from the address pill
+  in its header.
+- **Knowledge-base mode** needs a vector store on the server. The API refuses
+  it with a 400 until `research-copilot ingest` has run there, so a fresh
+  deploy is arXiv-only.
