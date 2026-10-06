@@ -35,6 +35,9 @@ studio = ["langgraph-cli[inmem]>=0.1.55"]
 # Phase 7: a second provider, for the live-verification pass on a free tier.
 # Optional: the Anthropic path never imports it.
 groq = ["langchain-groq>=1.1"]
+# Phase 7 Part F: the HTTP API (research_copilot.api). aiosqlite backs the
+# async SQLite checkpointer a server needs; httpx is FastAPI's TestClient.
+api = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "aiosqlite>=0.20", "httpx>=0.27"]
 
 [project.scripts]
 research-copilot = "research_copilot.cli:main"
